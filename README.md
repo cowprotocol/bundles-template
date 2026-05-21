@@ -92,24 +92,3 @@ The pre-push hooks run `just lint`, `just slither`, and `just coverage-check`. Y
 just snapshot
 ```
 
-### Local testing with Anvil
-
-Start a mainnet fork (requires `RPC_URL_1` in env):
-
-```shell
-just anvil-fork
-```
-
-In a separate terminal, deploy `ExampleWrapper` and register it as a solver:
-
-```shell
-just anvil-deploy
-```
-
-The command prints the deployed wrapper address. Paste it into `signing-test.html`, then serve the page:
-
-```shell
-just serve
-```
-
-Open `http://localhost:8080/signing-test.html` in a browser with MetaMask pointed at the local Anvil fork to test signing flows end-to-end.
