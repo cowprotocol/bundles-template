@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8;
 
+import {CowWrapper, ICowSettlement} from "./CowWrapper.sol";
+import {PreApprovedHashes} from "./PreApprovedHashes.sol";
 import {IERC1271} from "openzeppelin-contracts/contracts/interfaces/IERC1271.sol";
 import {ECDSA} from "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
-import {ICowSettlement, CowWrapper} from "./CowWrapper.sol";
-import {PreApprovedHashes} from "./PreApprovedHashes.sol";
 
 /// @dev Collection of EIP-712 type hashes. These hashes match those used by the CoW settlement contract.
 library CowAuthLibrary {
@@ -32,14 +32,15 @@ library CowAuthLibrary {
     /// @return domainSeparator The computed domain separator
     function computeDomainSeparator(address creationAddress) internal view returns (bytes32 domainSeparator) {
         return
-            /// forge-lint: disable-next-line(asm-keccak256)
-            keccak256(abi.encode(DOMAIN_TYPE_HASH, keccak256("CowAuthWrapper"), keccak256("1"), block.chainid, creationAddress));
+        /// forge-lint: disable-next-line(asm-keccak256)
+        keccak256(
+            abi.encode(DOMAIN_TYPE_HASH, keccak256("CowAuthWrapper"), keccak256("1"), block.chainid, creationAddress)
+        );
     }
 }
 
-/// @notice 
+/// @notice
 abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271 {
-
     error Unauthorized(address);
     error OrderHashMismatch(bytes32 computed, bytes32 provided);
     error InvalidSignatureOrderData(bytes data);
@@ -57,15 +58,11 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271 {
         SETTLEMENT_DOMAIN_SEPARATOR = SETTLEMENT.domainSeparator();
 
         ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
-            abi.encodePacked(
-                CowAuthLibrary.ORDER_TYPE_HASH_PLUS_WRAPPER_AND_APP_DATA_PREFIX,
-                wrapperTypeHashPostfix
-            )
+            abi.encodePacked(CowAuthLibrary.ORDER_TYPE_HASH_PLUS_WRAPPER_AND_APP_DATA_PREFIX, wrapperTypeHashPostfix)
         );
 
-        WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
-            abi.encodePacked("WrapperAndAppData(bytes32 appData,", wrapperTypeHashPostfix)
-        );
+        WRAPPER_AND_APP_DATA_TYPE_HASH =
+            keccak256(abi.encodePacked("WrapperAndAppData(bytes32 appData,", wrapperTypeHashPostfix));
     }
 
     function _wrap(bytes calldata settleData, bytes calldata wrapperData, bytes calldata remainingWrapperData)
@@ -74,7 +71,11 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271 {
     {
         CowAuthLibrary.WrapperAndAppData memory d = CowAuthLibrary.WrapperAndAppData({
             appData: abi.decode(wrapperData, (bytes32)), // appData is the first bytes given in the wrapperData
-            wrapperData: keccak256(wrapperData[32:]) // the rest of the wrapperData (after the first 32 bytes) is hashed to get the wrapperData hash, which is included in the signature verification
+            // The rest of the wrapperData (after the first 32 bytes) is the raw wrapper-specific data.
+            // We first convert it to its effective EIP-712 signing representation (hashing any nested /
+            // dynamic properties) and then hash that, so the committed value equals the `hashStruct` a
+            // signer produces off-chain. This is included in the signature verification.
+            wrapperData: keccak256(_wrapperSigningData(wrapperData[32:]))
         });
 
         bytes32 orderAppDataHash = keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, d.appData, d.wrapperData));
@@ -91,7 +92,20 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271 {
     }
 
     function _authedWrap(bytes calldata settleData, bytes calldata wrapperData, bytes calldata remainingWrapperData)
-        internal virtual;
+        internal
+        virtual;
+
+    /// @notice Returns the effective EIP-712 signing data for this wrapper's raw wrapper-specific data.
+    /// @dev `keccak256` of the returned value MUST equal the EIP-712 `hashStruct` of the wrapper's nested
+    ///      data type, i.e. `keccak256(typeHash ‖ encodeData)`. Per EIP-712, `encodeData` inlines static
+    ///      fields and replaces every dynamic value (string, bytes, array, sub-struct) with its keccak256
+    ///      hash. If the raw wrapperData contains no nested/dynamic properties it is already in EIP-712
+    ///      encoded form (a type hash followed by static words) and can be returned unchanged.
+    /// @param wrapperData The raw wrapper-specific data (the bytes following the 32-byte appData prefix).
+    ///        This is the same slice handed to `_authedWrap`, so it may carry raw dynamic values for the
+    ///        wrapper's own use even though only their hashes are committed into the signature.
+    /// @return The EIP-712 signing data whose keccak256 is the nested-struct hash committed into the signature.
+    function _wrapperSigningData(bytes calldata wrapperData) internal view virtual returns (bytes memory);
 
     /// @notice Implements EIP1271 `isValidSignature`. This function expects a 65 byte RSV signature, followed by the 416 byte CoW order data.
     /// The signature should be the same as the EIP-712 hash normally given to the settlement contract, except the domain separator should be `WRAPPER_DOMAIN_SEPARATOR()` from this contract.

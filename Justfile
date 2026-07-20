@@ -75,5 +75,47 @@ coverage-check:
 snapshot:
     forge snapshot --desc --show-progress
 
+# Serve signing-test.html over HTTP so MetaMask can inject window.ethereum (file:// pages don't work)
+serve:
+    python3 -m http.server 8080 --bind 127.0.0.1
+
+# Start Anvil mainnet fork
+anvil-fork:
+    anvil --fork-url "$RPC_URL_1"
+
+# Deploy ExampleWrapper to Anvil fork and register it as a solver.
+# Reads PRIVATE_KEY from env (defaults to Anvil account 0).
+# Set RPC_URL to override the default http://localhost:8545.
+anvil-deploy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    RPC="${RPC_URL:-http://localhost:8545}"
+    SETTLEMENT="0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
+    AUTHENTICATOR="0x2c4c28DDBdAc9C5E7055b4C863b72eA0149D8aFE"
+
+    echo "==> Deploying ExampleWrapper..."
+    FORGE_OUT=$(forge create src/ExampleWrapper.sol:ExampleWrapper \
+        --rpc-url "$RPC" \
+        --private-key "${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}" \
+        --broadcast \
+        --constructor-args "$SETTLEMENT" 2>&1) || { echo "forge create failed:"; echo "$FORGE_OUT"; exit 1; }
+    echo "$FORGE_OUT"
+    WRAPPER=$(echo "$FORGE_OUT" | grep -oP '(?<=Deployed to: )0x[0-9a-fA-F]+')
+    echo "ExampleWrapper deployed at: $WRAPPER"
+
+    echo "==> Fetching authenticator manager..."
+    MANAGER=$(cast call --rpc-url "$RPC" "$AUTHENTICATOR" "manager()(address)")
+    echo "Manager: $MANAGER"
+
+    echo "==> Impersonating manager and registering wrapper as solver..."
+    cast rpc --rpc-url "$RPC" anvil_impersonateAccount "$MANAGER"
+    cast send --rpc-url "$RPC" --from "$MANAGER" --unlocked \
+        "$AUTHENTICATOR" "addSolver(address)" "$WRAPPER"
+    cast rpc --rpc-url "$RPC" anvil_stopImpersonatingAccount "$MANAGER"
+
+    echo ""
+    echo "Done. Paste this wrapper address into signing-test.html:"
+    echo "  $WRAPPER"
+
 # Run build, lint, slither, coverage-check, snapshot
 all: build lint slither coverage-check snapshot

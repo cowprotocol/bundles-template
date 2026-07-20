@@ -4,10 +4,14 @@ pragma solidity ^0.8;
 import {Test} from "forge-std/Test.sol";
 import {console} from "forge-std/console.sol";
 import {IERC1271} from "openzeppelin-contracts/contracts/interfaces/IERC1271.sol";
-import {CowAuthWrapper, CowAuthLibrary} from "src/CowAuthWrapper.sol";
-import {ICowSettlement, ICowAuthentication, ICowWrapper, CowWrapper} from "src/CowWrapper.sol";
-import {BasicAuthWrapper, WrapperParams, WRAPPER_PARAMS_TYPE_HASH, WRAPPER_AND_APP_DATA_TYPE_HASH} from
-    "src/examples/BasicAuthWrapper.sol";
+import {CowAuthLibrary, CowAuthWrapper} from "src/CowAuthWrapper.sol";
+import {CowWrapper, ICowAuthentication, ICowSettlement, ICowWrapper} from "src/CowWrapper.sol";
+import {
+    BasicAuthWrapper,
+    WRAPPER_AND_APP_DATA_TYPE_HASH,
+    WRAPPER_PARAMS_TYPE_HASH,
+    WrapperParams
+} from "src/examples/BasicAuthWrapper.sol";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -74,7 +78,7 @@ contract CowAuthWrapperForkTest is Test {
     address internal owner;
 
     function setUp() public {
-        vm.createSelectFork("mainnet");
+        vm.createSelectFork(vm.envString("FORK_RPC_URL"));
 
         ownerKey = uint256(keccak256("cow auth wrapper test owner"));
         owner = vm.addr(ownerKey);
@@ -165,7 +169,9 @@ contract CowAuthWrapperForkTest is Test {
         console.log("orderAppDataHash (WrapperAndAppData struct hash, placed in order appData field):");
         console.logBytes32(orderAppDataHash);
 
-        bytes memory encodeData = _buildEncodeData(sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount);
+        bytes memory encodeData = _buildEncodeData(
+            sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount
+        );
         assertEq(encodeData.length, 384);
 
         bytes32 settlementDomSep = wrapper.SETTLEMENT_DOMAIN_SEPARATOR();
@@ -237,7 +243,9 @@ contract CowAuthWrapperForkTest is Test {
         console.log("orderAppDataHash (WrapperAndAppData struct hash, placed in order appData field):");
         console.logBytes32(orderAppDataHash);
 
-        bytes memory encodeData = _buildEncodeData(sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount);
+        bytes memory encodeData = _buildEncodeData(
+            sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount
+        );
         assertEq(encodeData.length, 384);
 
         bytes32 settlementDomSep = wrapper.SETTLEMENT_DOMAIN_SEPARATOR();
@@ -317,31 +325,33 @@ contract CowAuthWrapperForkTest is Test {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /// @notice Builds the 160-byte wrapperData and derives the two commitment hashes.
+    /// @notice Builds the wrapperData and derives the two commitment hashes.
     ///
     /// wrapperData layout:
-    ///   [0:32]    originalAppData
-    ///   [32:64]   WRAPPER_PARAMS_TYPE_HASH
-    ///   [64:96]   WrapperParams.target   (address ABI-padded to 32 bytes)
-    ///   [96:128]  WrapperParams.amount   (uint128 ABI-padded to 32 bytes)
-    ///   [128:160] keccak256(WrapperParams.label as bytes)
+    ///   [0:32]  originalAppData
+    ///   [32:]   abi.encode(WrapperParams)   (raw ABI encoding, label string intact)
     ///
-    /// The slice wrapperData[32:] is the EIP-712 struct encoding of WrapperParams, so
-    /// keccak256(wrapperData[32:]) == wrapperParamsHash, which is what _wrap stores as
+    /// The raw tail wrapperData[32:] is what _authedWrap decodes. Its committed hash, however, is the
+    /// EIP-712 hashStruct of WrapperParams — keccak256(typeHash ‖ target ‖ amount ‖ keccak256(label)) —
+    /// which is what CowAuthWrapper._wrapperSigningData produces and _wrap hashes into
     /// WrapperAndAppData.wrapperData.
     function _buildWrapperData(bytes32 originalAppData, WrapperParams memory params)
         internal
         pure
         returns (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppDataHash)
     {
-        bytes memory paramsEncodeData = abi.encode(params.target, uint256(params.amount), keccak256(bytes(params.label)));
-
-        wrapperParamsHash = keccak256(abi.encodePacked(WRAPPER_PARAMS_TYPE_HASH, paramsEncodeData));
+        // wrapperParamsHash == hashStruct(WrapperParams): the dynamic `label` is replaced by its hash and
+        // the struct type hash is prefixed. Mirrors BasicAuthWrapper._wrapperSigningData.
+        wrapperParamsHash = keccak256(
+            abi.encode(WRAPPER_PARAMS_TYPE_HASH, params.target, params.amount, keccak256(bytes(params.label)))
+        );
 
         // orderAppDataHash = hashStruct(WrapperAndAppData) — proper EIP-712 with type hash prefix.
-        orderAppDataHash = keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, originalAppData, wrapperParamsHash));
+        orderAppDataHash =
+            keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, originalAppData, wrapperParamsHash));
 
-        wrapperData = abi.encodePacked(originalAppData, WRAPPER_PARAMS_TYPE_HASH, paramsEncodeData);
+        // The tail is the raw ABI-encoded struct so the wrapper can recover the original label string.
+        wrapperData = abi.encodePacked(originalAppData, abi.encode(params));
     }
 
     function _buildEncodeData(

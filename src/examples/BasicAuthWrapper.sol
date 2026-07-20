@@ -36,30 +36,38 @@ bytes32 constant WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
 contract BasicAuthWrapper is CowAuthWrapper {
     constructor(ICowSettlement settlement) CowAuthWrapper(WRAPPER_TYPE_HASH_POSTFIX, settlement) {}
 
+    event AuthedData(uint128 indexed amount, string message);
+
     function name() external pure returns (string memory) {
         return "Basic Auth Demo Wrapper";
     }
 
-    // wrapperData received here is wrapperData[32:] from CowAuthWrapper._wrap, i.e. the bytes
-    // whose keccak256 equals WrapperAndAppData.wrapperData.  Layout:
-    //   [0:32]   WRAPPER_PARAMS_TYPE_HASH
-    //   [32:64]  target  (address ABI-padded to 32 bytes; actual address at [44:64])
-    //   [64:96]  amount  (uint128 ABI-padded to 32 bytes)
-    //   [96:128] keccak256(label as bytes)
-    //
-    // Decode example:
-    //   address target   = address(bytes20(wrapperData[44:64]));
-    //   uint128 amount   = uint128(uint256(bytes32(wrapperData[64:96])));
-    //   bytes32 labelHash = bytes32(wrapperData[96:128]);
-    function _authedWrap(bytes calldata settleData, bytes calldata, bytes calldata remaining)
+    /// @inheritdoc CowAuthWrapper
+    /// @dev The raw wrapperData is `abi.encode(WrapperParams)`. `label` is a dynamic string, so per
+    ///      EIP-712 its encoding is `keccak256(bytes(label))`; the static fields are inlined. Prefixing
+    ///      the struct type hash yields bytes whose keccak256 equals `hashStruct(WrapperParams)`.
+    function _wrapperSigningData(bytes calldata wrapperData) internal pure override returns (bytes memory) {
+        WrapperParams memory params = abi.decode(wrapperData, (WrapperParams));
+        return abi.encode(WRAPPER_PARAMS_TYPE_HASH, params.target, params.amount, keccak256(bytes(params.label)));
+    }
+
+    /// @dev `wrapperData` here is the raw `abi.encode(WrapperParams)` tail (with the original `label`
+    ///      string intact), so it decodes directly into the trusted, signature-bound parameters.
+    function _authedWrap(bytes calldata settleData, bytes calldata wrapperData, bytes calldata remaining)
         internal
         override
     {
         _next(settleData, remaining);
+
+        WrapperParams memory params = abi.decode(wrapperData, (WrapperParams));
+
+        emit AuthedData(params.amount, string(abi.encodePacked("Trusted data! ", params.label)));
     }
 
-    // wrapperData = 32 bytes originalAppData + 128 bytes WrapperParams struct encoding = 160 bytes.
+    /// @dev wrapperData = 32 bytes originalAppData followed by `abi.encode(WrapperParams)`. The length is
+    ///      variable because `label` is a dynamic string, so we validate by decoding rather than by size.
     function validateWrapperData(bytes calldata data) external pure override {
-        require(data.length == 160, "wrapperData must be exactly 160 bytes");
+        require(data.length >= 32, "wrapperData too short");
+        abi.decode(data[32:], (WrapperParams));
     }
 }
