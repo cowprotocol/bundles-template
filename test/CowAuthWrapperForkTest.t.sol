@@ -155,23 +155,22 @@ contract CowAuthWrapperForkTest is Test {
         console.log("WrapperParams.amount:  ", uint256(params.amount));
         console.log("WrapperParams.label:   ", params.label);
 
-        bytes32 originalAppData = keccak256("pre-approved-app-data");
-        console.log("originalAppData:");
-        console.logBytes32(originalAppData);
+        bytes32 nestedAppData = keccak256("pre-approved-app-data");
+        console.log("nestedAppData:");
+        console.logBytes32(nestedAppData);
 
-        (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppDataHash) =
-            _buildWrapperData(originalAppData, params);
+        (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppData) =
+            _buildWrapperData(nestedAppData, params);
 
         console.log("WRAPPER_PARAMS_TYPE_HASH:");
         console.logBytes32(WRAPPER_PARAMS_TYPE_HASH);
         console.log("wrapperParamsHash (EIP-712 struct hash of WrapperParams):");
         console.logBytes32(wrapperParamsHash);
-        console.log("orderAppDataHash (WrapperAndAppData struct hash, placed in order appData field):");
-        console.logBytes32(orderAppDataHash);
+        console.log("orderAppData (WrapperAndAppData struct hash, placed in order appData field):");
+        console.logBytes32(orderAppData);
 
-        bytes memory encodeData = _buildEncodeData(
-            sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount
-        );
+        bytes memory encodeData =
+            _buildEncodeData(sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppData, feeAmount);
         assertEq(encodeData.length, 384);
 
         bytes32 settlementDomSep = wrapper.SETTLEMENT_DOMAIN_SEPARATOR();
@@ -229,23 +228,22 @@ contract CowAuthWrapperForkTest is Test {
         console.log("WrapperParams.amount:  ", uint256(params.amount));
         console.log("WrapperParams.label:   ", params.label);
 
-        bytes32 originalAppData = keccak256("ecdsa-app-data");
-        console.log("originalAppData:");
-        console.logBytes32(originalAppData);
+        bytes32 nestedAppData = keccak256("ecdsa-app-data");
+        console.log("nestedAppData:");
+        console.logBytes32(nestedAppData);
 
-        (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppDataHash) =
-            _buildWrapperData(originalAppData, params);
+        (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppData) =
+            _buildWrapperData(nestedAppData, params);
 
         console.log("WRAPPER_PARAMS_TYPE_HASH:");
         console.logBytes32(WRAPPER_PARAMS_TYPE_HASH);
         console.log("wrapperParamsHash (EIP-712 struct hash of WrapperParams):");
         console.logBytes32(wrapperParamsHash);
-        console.log("orderAppDataHash (WrapperAndAppData struct hash, placed in order appData field):");
-        console.logBytes32(orderAppDataHash);
+        console.log("orderAppData (WrapperAndAppData struct hash, placed in order appData field):");
+        console.logBytes32(orderAppData);
 
-        bytes memory encodeData = _buildEncodeData(
-            sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppDataHash, feeAmount
-        );
+        bytes memory encodeData =
+            _buildEncodeData(sellToken, buyToken, receiver, sellAmount, buyAmount, validTo, orderAppData, feeAmount);
         assertEq(encodeData.length, 384);
 
         bytes32 settlementDomSep = wrapper.SETTLEMENT_DOMAIN_SEPARATOR();
@@ -328,17 +326,17 @@ contract CowAuthWrapperForkTest is Test {
     /// @notice Builds the wrapperData and derives the two commitment hashes.
     ///
     /// wrapperData layout:
-    ///   [0:32]  originalAppData
+    ///   [0:32]  nestedAppData
     ///   [32:]   abi.encode(WrapperParams)   (raw ABI encoding, label string intact)
     ///
     /// The raw tail wrapperData[32:] is what _authedWrap decodes. Its committed hash, however, is the
     /// EIP-712 hashStruct of WrapperParams — keccak256(typeHash ‖ target ‖ amount ‖ keccak256(label)) —
     /// which is what CowAuthWrapper._wrapperSigningData produces and _wrap hashes into
     /// WrapperAndAppData.wrapperData.
-    function _buildWrapperData(bytes32 originalAppData, WrapperParams memory params)
+    function _buildWrapperData(bytes32 nestedAppData, WrapperParams memory params)
         internal
         pure
-        returns (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppDataHash)
+        returns (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppData)
     {
         // wrapperParamsHash == hashStruct(WrapperParams): the dynamic `label` is replaced by its hash and
         // the struct type hash is prefixed. Mirrors BasicAuthWrapper._wrapperSigningData.
@@ -346,12 +344,11 @@ contract CowAuthWrapperForkTest is Test {
             abi.encode(WRAPPER_PARAMS_TYPE_HASH, params.target, params.amount, keccak256(bytes(params.label)))
         );
 
-        // orderAppDataHash = hashStruct(WrapperAndAppData) — proper EIP-712 with type hash prefix.
-        orderAppDataHash =
-            keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, originalAppData, wrapperParamsHash));
+        // orderAppData = hashStruct(WrapperAndAppData) — proper EIP-712 with type hash prefix.
+        orderAppData = keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, nestedAppData, wrapperParamsHash));
 
         // The tail is the raw ABI-encoded struct so the wrapper can recover the original label string.
-        wrapperData = abi.encodePacked(originalAppData, abi.encode(params));
+        wrapperData = abi.encodePacked(nestedAppData, abi.encode(params));
     }
 
     function _buildEncodeData(
@@ -361,7 +358,7 @@ contract CowAuthWrapperForkTest is Test {
         uint256 sellAmount,
         uint256 buyAmount,
         uint32 validTo,
-        bytes32 orderAppDataHash,
+        bytes32 orderAppData,
         uint256 feeAmount
     ) internal pure returns (bytes memory) {
         return abi.encode(
@@ -371,7 +368,7 @@ contract CowAuthWrapperForkTest is Test {
             sellAmount,
             buyAmount,
             validTo,
-            orderAppDataHash,
+            orderAppData,
             feeAmount,
             KIND_SELL,
             false,

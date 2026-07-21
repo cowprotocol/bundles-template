@@ -18,15 +18,16 @@ struct WrapperParams {
 
 bytes32 constant WRAPPER_PARAMS_TYPE_HASH = keccak256("WrapperParams(address target,uint128 amount,string label)");
 
-// Completes "WrapperAndAppData(bytes32 appData," — passed to CowAuthWrapper as wrapperTypeHashPostfix.
+// Completes "WrapperAndAppData(bytes32 nestedAppData," — passed to CowAuthWrapper as wrapperTypeHashPostfix.
 string constant WRAPPER_TYPE_HASH_POSTFIX =
     "WrapperParams wrapperData)WrapperParams(address target,uint128 amount,string label)";
 
-// hashStruct type hash for the WrapperAndAppData envelope (including its referenced sub-type).
-// This is the value placed in the CoW order's appData field so that both the settlement and
-// the wrapper can verify the order is correctly bound to these WrapperParams.
+// Type hash of the WrapperAndAppData envelope (including its referenced sub-type). keccak256 of this
+// type hash together with the nestedAppData and the WrapperParams hashStruct yields the orderAppData —
+// the value placed in the CoW order's `appData` field so that both the settlement and the wrapper can
+// verify the order is correctly bound to these WrapperParams.
 bytes32 constant WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
-    "WrapperAndAppData(bytes32 appData,WrapperParams wrapperData)WrapperParams(address target,uint128 amount,string label)"
+    "WrapperAndAppData(bytes32 nestedAppData,WrapperParams wrapperData)WrapperParams(address target,uint128 amount,string label)"
 );
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,7 @@ contract BasicAuthWrapper is CowAuthWrapper {
         emit AuthedData(params.amount, string(abi.encodePacked("Trusted data! ", params.label)));
     }
 
-    /// @dev wrapperData = 32 bytes originalAppData followed by `abi.encode(WrapperParams)`. The length is
+    /// @dev wrapperData = 32 bytes nestedAppData followed by `abi.encode(WrapperParams)`. The length is
     ///      variable because `label` is a dynamic string, so we validate by decoding rather than by size.
     function validateWrapperData(bytes calldata data) external pure override {
         require(data.length >= 32, "wrapperData too short");
