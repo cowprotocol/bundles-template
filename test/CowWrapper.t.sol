@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8;
 
+import {CowWrapper, ICowAuthentication, ICowSettlement, ICowWrapper} from "../src/CowWrapper.sol";
 import {Test} from "forge-std/Test.sol";
-import {CowWrapper, ICowWrapper, ICowSettlement, ICowAuthentication} from "../src/CowWrapper.sol";
 
-import {MockCowSettlement, MockCowAuthentication} from "./mocks/MockCowProtocol.sol";
+import {MockCowAuthentication, MockCowSettlement} from "./mocks/MockCowProtocol.sol";
 
 import {CowWrapperHelpers} from "../src/CowWrapperHelpers.sol";
 
@@ -248,14 +248,14 @@ contract CowWrapperTest is Test {
 
         // Create maximum length wrapper data (65535 bytes)
         // Format: [2-byte length = 0xFFFF][65535 bytes of data]
-        bytes memory maxData = new bytes(65535);
-        for (uint256 i = 0; i < 65535; i++) {
+        bytes memory maxData = new bytes(65_535);
+        for (uint256 i = 0; i < 65_535; i++) {
             // casting to 'uint8' is safe because its already being truncated ty less than the maximum value by the modulo
             // forge-lint: disable-next-line(unsafe-typecast)
             maxData[i] = bytes1(uint8(i % 256));
         }
 
-        bytes memory wrapperData = abi.encodePacked(uint16(65535), maxData);
+        bytes memory wrapperData = abi.encodePacked(uint16(65_535), maxData);
 
         // Should successfully parse the maximum length data and call settlement
         vm.expectCall(address(mockSettlement), 0, settleData, 1);
@@ -283,8 +283,8 @@ contract CowWrapperTest is Test {
         bytes memory settleData = _createSimpleSettleData(0);
 
         // Create maximum length wrapper data followed by next wrapper address
-        bytes memory maxData = new bytes(65535);
-        for (uint256 i = 0; i < 65535; i++) {
+        bytes memory maxData = new bytes(65_535);
+        for (uint256 i = 0; i < 65_535; i++) {
             // casting to 'uint8' is safe because its already being truncated ty less than the maximum value by the modulo
             // forge-lint: disable-next-line(unsafe-typecast)
             maxData[i] = bytes1(uint8(i % 256));

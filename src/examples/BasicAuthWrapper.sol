@@ -65,10 +65,11 @@ contract BasicAuthWrapper is CowAuthWrapper {
         emit AuthedData(params.amount, string(abi.encodePacked("Trusted data! ", params.label)));
     }
 
-    /// @dev wrapperData = 32 bytes nestedAppData followed by `abi.encode(WrapperParams)`. The length is
-    ///      variable because `label` is a dynamic string, so we validate by decoding rather than by size.
+    /// @dev wrapperData = 32 bytes nestedAppData ‖ 384 bytes order orderData ‖ `abi.encode(WrapperParams)`.
+    ///      The length is variable because `label` is a dynamic string, so we validate by decoding rather
+    ///      than by size (beyond requiring the fixed nestedAppData + orderData prefix is present).
     function validateWrapperData(bytes calldata data) external pure override {
-        require(data.length >= 32, "wrapperData too short");
-        abi.decode(data[32:], (WrapperParams));
+        require(data.length >= 32 + 384, "wrapperData too short");
+        abi.decode(data[32 + 384:], (WrapperParams));
     }
 }

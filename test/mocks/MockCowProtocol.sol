@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8;
 
-import {ICowSettlement, ICowAuthentication} from "../../../src/CowWrapper.sol";
+import {ICowAuthentication, ICowSettlement} from "../../../src/CowWrapper.sol";
 
 import {Address} from "openzeppelin-contracts/contracts/utils/Address.sol";
 
@@ -24,6 +24,10 @@ contract MockCowAuthentication is ICowAuthentication {
 contract MockCowSettlement is ICowSettlement {
     ICowAuthentication public immutable AUTH;
     mapping(bytes => bool) public preSignatures;
+
+    /// @dev Satisfies ICowSettlement.filledAmount. This mock never fills orders, so it stays zero — the
+    ///      plain (non-auth) CowWrapper tests that use this mock do not exercise the fill check.
+    mapping(bytes => uint256) public override filledAmount;
 
     constructor(address _auth) {
         AUTH = ICowAuthentication(_auth);

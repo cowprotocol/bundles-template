@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8;
 
-import {ICowSettlement, CowWrapper} from "../CowWrapper.sol";
+import {CowWrapper, ICowSettlement} from "../CowWrapper.sol";
 
 contract EmptyWrapper is CowWrapper {
     string public override name = "Empty Wrapper";

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8;
 
-import {Test} from "forge-std/Test.sol";
-import {CowWrapperHelpers} from "../src/CowWrapperHelpers.sol";
 import {ICowAuthentication, ICowSettlement} from "../src/CowWrapper.sol";
-import {MockCowSettlement, MockCowAuthentication} from "./mocks/MockCowProtocol.sol";
+import {CowWrapperHelpers} from "../src/CowWrapperHelpers.sol";
+import {MockCowAuthentication, MockCowSettlement} from "./mocks/MockCowProtocol.sol";
+import {Test} from "forge-std/Test.sol";
 
 import {EmptyWrapper} from "../src/examples/EmptyWrapper.sol";
 
@@ -17,7 +17,7 @@ contract CowWrapperHelpersTest is Test {
     EmptyWrapper wrapper2;
     EmptyWrapper wrapper3;
 
-    uint256 constant TOO_LONG_LENGTH = 65536;
+    uint256 constant TOO_LONG_LENGTH = 65_536;
 
     function setUp() public {
         wrapperAuth = new MockCowAuthentication();
@@ -184,7 +184,7 @@ contract CowWrapperHelpersTest is Test {
 
     function test_verifyAndBuildWrapperData_SucceedsWithMaxLengthData() public {
         // Create data that's exactly 65535 bytes (max valid uint16)
-        bytes memory maxLengthData = new bytes(65535);
+        bytes memory maxLengthData = new bytes(65_535);
 
         // Create a wrapper that consumes all bytes
         EmptyWrapper largeWrapper = new EmptyWrapper(ICowSettlement(address(mockSettlement)));
@@ -198,6 +198,6 @@ contract CowWrapperHelpersTest is Test {
 
         // Verify the length prefix is correct (first 2 bytes)
         bytes2 lengthPrefix = abi.decode(result, (bytes2));
-        assertEq(uint16(lengthPrefix), 65535);
+        assertEq(uint16(lengthPrefix), 65_535);
     }
 }

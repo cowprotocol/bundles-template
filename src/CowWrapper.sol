@@ -56,6 +56,14 @@ interface ICowSettlement {
     /// @notice Returns the domain separator for EIP-712 signing
     function domainSeparator() external view returns (bytes32);
 
+    /// @notice Returns the amount that has been filled for a given order.
+    /// @dev Auto-generated getter for GPv2Settlement's `mapping(bytes => uint256) public filledAmount`.
+    ///      For a fill-or-kill order this is `0` until it settles and the full sold/bought amount after.
+    ///      An auth wrapper reads this before and after settling to confirm its order was actually filled.
+    /// @param orderUid The packed order unique identifier: `orderDigest(32) ‖ owner(20) ‖ validTo(4)`.
+    /// @return The filled amount recorded for the order.
+    function filledAmount(bytes calldata orderUid) external view returns (uint256);
+
     /// @notice Allows for approval of orders by submitting an authorized hash on-chain prior to order execution.
     function setPreSignature(bytes calldata orderUid, bool signed) external;
 

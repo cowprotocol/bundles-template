@@ -23,14 +23,9 @@ import {WRAPPER_PARAMS_TYPE_HASH, WRAPPER_TYPE_HASH_POSTFIX, WrapperParams} from
 ///      signature and the on-chain order-digest match. A real implementation would derive the owner from
 ///      a dedicated, semantically meaningful field (e.g. a Safe address) the same way.
 ///
-///      Mechanics: `_authorizingOwner` only receives `signatureData`, so the owner (which lives in
-///      wrapperData) is stashed in transient storage during `_authedWrap` and read back inside the
-///      EIP-1271 callback later in the same settlement transaction — mirroring how the base contract
-///      passes its orderAppData commitment through transient storage.
+///      Mechanics: `_authorizingOwner` now receives the (trusted, signature-bound) `params` directly, so
+///      the owner can be decoded from `WrapperParams.target` with no transient-storage plumbing.
 contract WrapperDataOwnerAuthWrapper is CowAuthWrapper {
-    // Transient slot carrying the owner from `_authedWrap` to `isValidSignature` within one settlement tx.
-    bytes32 private constant OWNER_TSLOT = keccak256("integration.auth.owner.tslot");
-
     constructor(ICowSettlement settlement) CowAuthWrapper(WRAPPER_TYPE_HASH_POSTFIX, settlement) {}
 
     function name() external pure returns (string memory) {
@@ -44,26 +39,14 @@ contract WrapperDataOwnerAuthWrapper is CowAuthWrapper {
         return abi.encode(WRAPPER_PARAMS_TYPE_HASH, params.target, params.amount, keccak256(bytes(params.label)));
     }
 
-    /// @dev Stash the owner (`WrapperParams.target`) before continuing into settlement so the EIP-1271
-    ///      callback can recover it. The wrapperData here is the trusted, signature-bound tail.
-    function _authedWrap(bytes calldata settleData, bytes calldata wrapperData, bytes calldata remaining)
-        internal
-        override
-    {
-        address owner = abi.decode(wrapperData, (WrapperParams)).target;
-        bytes32 slot = OWNER_TSLOT;
-        assembly {
-            tstore(slot, owner)
-        }
+    /// @dev No custom pre/post-settlement logic needed; just continue the chain into settlement.
+    function _authedWrap(bytes calldata settleData, bytes calldata, bytes calldata remaining) internal override {
         _next(settleData, remaining);
     }
 
-    /// @dev Overrides `CowAuthWrapper._authorizingOwner` to return the owner stashed from wrapperData.
-    function _authorizingOwner(bytes calldata) internal view override returns (address owner) {
-        bytes32 slot = OWNER_TSLOT;
-        assembly {
-            owner := tload(slot)
-        }
+    /// @dev Overrides `CowAuthWrapper._authorizingOwner` to derive the owner from the signature-bound params.
+    function _authorizingOwner(bytes calldata, bytes calldata params) internal pure override returns (address) {
+        return abi.decode(params, (WrapperParams)).target;
     }
 
     /// @dev Validates the wrapperData decodes into `WrapperParams`.
@@ -147,11 +130,12 @@ contract CowAuthWrapperIntegrationTest is Test {
     /// @notice The on-chain `computeOrderAppData` getter (used by the orderbook to validate a wrapper
     ///         order's orderAppData) must return exactly the envelope hash the order commits to.
     function test_computeOrderAppData_matchesEnvelope() public view {
+        bytes32 nestedAppData = keccak256("integration-app-data");
         WrapperParams memory params = WrapperParams({target: owner, amount: 42_000e18, label: "integration"});
-        (bytes memory wrapperData,, bytes32 orderAppData) = _buildWrapperData(keccak256("integration-app-data"), params);
+        (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
 
         assertEq(
-            wrapper.computeOrderAppData(wrapperData),
+            wrapper.computeOrderAppData(_commitmentData(nestedAppData, params)),
             orderAppData,
             "getter must reproduce the WrapperAndAppData envelope hash"
         );
@@ -189,15 +173,16 @@ contract CowAuthWrapperIntegrationTest is Test {
         uint32 validTo = uint32(block.timestamp + 1 hours);
 
         // `WrapperParams.target` doubles as the authorizing owner in this demo implementation.
+        bytes32 nestedAppData = keccak256("integration-app-data");
         WrapperParams memory params = WrapperParams({target: owner, amount: 42_000e18, label: "integration"});
-        (bytes memory wrapperData,, bytes32 orderAppData) = _buildWrapperData(keccak256("integration-app-data"), params);
+        (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
 
-        bytes memory encodeData = _buildEncodeData(
+        bytes memory orderData = _buildEncodeData(
             address(WETH), address(USDC), receiver, SELL_AMOUNT, BUY_AMOUNT, validTo, orderAppData, FEE_AMOUNT
         );
-        assertEq(encodeData.length, 384);
+        assertEq(orderData.length, 384);
 
-        bytes memory signatureData = _buildSignatureData(useEcdsa, encodeData);
+        bytes memory signatureData = _buildSignatureData(useEcdsa, orderData);
 
         // Fund the trade with real tokens: the wrapper (CoW order owner) holds and approves the sell token;
         // the settlement holds the buy-side liquidity that will be paid to the receiver.
@@ -207,17 +192,19 @@ contract CowAuthWrapperIntegrationTest is Test {
         deal(address(USDC), MAINNET_SETTLEMENT, BUY_AMOUNT);
 
         settleData = _buildSettleData(validTo, orderAppData, signatureData);
+        // On-chain wrapperData now embeds the order orderData between nestedAppData and the params.
+        bytes memory wrapperData = _buildWrapperData(nestedAppData, orderData, params);
         chainedWrapperData = abi.encodePacked(uint16(wrapperData.length), wrapperData);
     }
 
-    /// @dev Produces `[65-byte sig][384-byte encodeData]`. ECDSA path signs the wrapper-domain digest;
-    ///      pre-approved path uses a zero sig (v = 0) and records the digest as pre-approved by `owner`.
-    function _buildSignatureData(bool useEcdsa, bytes memory encodeData) internal returns (bytes memory) {
+    /// @dev Produces the 65-byte EIP-1271 signature payload (the order data now travels in wrapperData).
+    ///      ECDSA path signs the wrapper-domain digest; pre-approved path uses a zero sig (v = 0) and records
+    ///      the digest as pre-approved by `owner`.
+    function _buildSignatureData(bool useEcdsa, bytes memory orderData) internal returns (bytes memory sig) {
         bytes32 wrapperOrderDigest = _orderDigest(
-            wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), encodeData
+            wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), orderData
         );
 
-        bytes memory sig;
         if (useEcdsa) {
             (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, wrapperOrderDigest);
             assertTrue(v == 27 || v == 28, "unexpected v");
@@ -229,9 +216,7 @@ contract CowAuthWrapperIntegrationTest is Test {
             assertTrue(wrapper.isHashPreApproved(owner, wrapperOrderDigest));
         }
 
-        bytes memory signatureData = abi.encodePacked(sig, encodeData);
-        assertEq(signatureData.length, 449);
-        return signatureData;
+        assertEq(sig.length, 65);
     }
 
     // -----------------------------------------------------------------------
@@ -273,12 +258,12 @@ contract CowAuthWrapperIntegrationTest is Test {
         return abi.encodeCall(ICowSettlement.settle, (tokens, prices, trades, _emptyInteractions()));
     }
 
-    /// @notice Builds the wrapperData tail and derives the WrapperAndAppData commitment hash.
+    /// @notice Derives the WrapperAndAppData commitment hashes.
     ///         Mirrors `CowAuthWrapperForkTest` / `BasicAuthWrapper._wrapperSigningData`.
-    function _buildWrapperData(bytes32 nestedAppData, WrapperParams memory params)
+    function _appDataHashes(bytes32 nestedAppData, WrapperParams memory params)
         internal
         pure
-        returns (bytes memory wrapperData, bytes32 wrapperParamsHash, bytes32 orderAppData)
+        returns (bytes32 wrapperParamsHash, bytes32 orderAppData)
     {
         wrapperParamsHash = keccak256(
             abi.encode(
@@ -297,7 +282,21 @@ contract CowAuthWrapperIntegrationTest is Test {
                 wrapperParamsHash
             )
         );
-        wrapperData = abi.encodePacked(nestedAppData, abi.encode(params));
+    }
+
+    /// @notice The pre-order commitment tuple `nestedAppData ‖ abi.encode(params)` accepted by
+    ///         `computeOrderAppData`. NOT the on-chain wrapperData (which also embeds the order orderData).
+    function _commitmentData(bytes32 nestedAppData, WrapperParams memory params) internal pure returns (bytes memory) {
+        return abi.encodePacked(nestedAppData, abi.encode(params));
+    }
+
+    /// @notice The full on-chain wrapperData: `nestedAppData ‖ orderData ‖ abi.encode(params)`.
+    function _buildWrapperData(bytes32 nestedAppData, bytes memory orderData, WrapperParams memory params)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodePacked(nestedAppData, orderData, abi.encode(params));
     }
 
     function _buildEncodeData(
@@ -326,12 +325,12 @@ contract CowAuthWrapperIntegrationTest is Test {
         );
     }
 
-    function _orderDigest(bytes32 domainSeparator, bytes32 typeHash, bytes memory encodeData)
+    function _orderDigest(bytes32 domainSeparator, bytes32 typeHash, bytes memory orderData)
         internal
         pure
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encodePacked(typeHash, encodeData));
+        bytes32 structHash = keccak256(abi.encodePacked(typeHash, orderData));
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
