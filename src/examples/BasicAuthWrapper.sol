@@ -18,9 +18,13 @@ struct WrapperParams {
 
 bytes32 constant WRAPPER_PARAMS_TYPE_HASH = keccak256("WrapperParams(address target,uint128 amount,string label)");
 
-// Completes "WrapperAndAppData(bytes32 nestedAppData," — passed to CowAuthWrapper as wrapperTypeHashPostfix.
-string constant WRAPPER_TYPE_HASH_POSTFIX =
-    "WrapperParams wrapperData)WrapperParams(address target,uint128 amount,string label)";
+// Full EIP-712 definition of the `WrapperAndAppData` envelope struct (up to and including its own closing
+// paren), passed to CowAuthWrapper as `wrapperStructDef`. Its second field references `WrapperParams`.
+string constant WRAPPER_AND_APP_DATA_STRUCT_DEF = "WrapperAndAppData(bytes32 nestedAppData,WrapperParams wrapperData)";
+
+// The referenced struct definitions the envelope depends on, passed to CowAuthWrapper as `referencedTypeDefs`.
+// Here that is just `WrapperParams`.
+string constant WRAPPER_PARAMS_STRUCT_DEF = "WrapperParams(address target,uint128 amount,string label)";
 
 // Type hash of the WrapperAndAppData envelope (including its referenced sub-type). keccak256 of this
 // type hash together with the nestedAppData and the WrapperParams hashStruct yields the orderAppData —
@@ -35,7 +39,9 @@ bytes32 constant WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
 // ---------------------------------------------------------------------------
 
 contract BasicAuthWrapper is CowAuthWrapper {
-    constructor(ICowSettlement settlement) CowAuthWrapper(WRAPPER_TYPE_HASH_POSTFIX, settlement) {}
+    constructor(ICowSettlement settlement)
+        CowAuthWrapper(WRAPPER_AND_APP_DATA_STRUCT_DEF, WRAPPER_PARAMS_STRUCT_DEF, settlement)
+    {}
 
     event AuthedData(uint128 indexed amount, string message);
 
@@ -65,11 +71,20 @@ contract BasicAuthWrapper is CowAuthWrapper {
         emit AuthedData(params.amount, string(abi.encodePacked("Trusted data! ", params.label)));
     }
 
-    /// @dev wrapperData = 32 bytes nestedAppData ‖ 384 bytes order orderData ‖ `abi.encode(WrapperParams)`.
-    ///      The length is variable because `label` is a dynamic string, so we validate by decoding rather
-    ///      than by size (beyond requiring the fixed nestedAppData + orderData prefix is present).
+    /// @inheritdoc CowAuthWrapper
+    /// @dev This wrapper is itself the EIP-1271 verifier GPv2 calls and the account the sell tokens are pulled
+    ///      from, so CoW's order owner is this contract. (Distinct from the authorizing owner, which the
+    ///      default `_authorizingOwner` reads from the order's sell-token slot.)
+    function _settlementOrderOwner(bytes calldata, bytes calldata) internal view override returns (address) {
+        return address(this);
+    }
+
+    /// @dev wrapperData = 32 bytes nestedAppData ‖ 384 bytes order orderData ‖ 65 bytes owner signature ‖
+    ///      `abi.encode(WrapperParams)`. The length is variable because `label` is a dynamic string, so we
+    ///      validate by decoding rather than by size (beyond requiring the fixed nestedAppData + orderData +
+    ///      signature prefix is present).
     function validateWrapperData(bytes calldata data) external pure override {
-        require(data.length >= 32 + 384, "wrapperData too short");
-        abi.decode(data[32 + 384:], (WrapperParams));
+        require(data.length >= 32 + 384 + 65, "wrapperData too short");
+        abi.decode(data[32 + 384 + 65:], (WrapperParams));
     }
 }

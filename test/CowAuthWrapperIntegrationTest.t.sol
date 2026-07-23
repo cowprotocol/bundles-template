@@ -6,7 +6,12 @@ import {console} from "forge-std/console.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {CowAuthWrapper} from "src/CowAuthWrapper.sol";
 import {ICowAuthentication, ICowSettlement, ICowWrapper} from "src/CowWrapper.sol";
-import {WRAPPER_PARAMS_TYPE_HASH, WRAPPER_TYPE_HASH_POSTFIX, WrapperParams} from "src/examples/BasicAuthWrapper.sol";
+import {
+    WRAPPER_AND_APP_DATA_STRUCT_DEF,
+    WRAPPER_PARAMS_STRUCT_DEF,
+    WRAPPER_PARAMS_TYPE_HASH,
+    WrapperParams
+} from "src/examples/BasicAuthWrapper.sol";
 
 // ---------------------------------------------------------------------------
 // Test implementation: authorizing owner sourced from the wrapperData
@@ -26,7 +31,9 @@ import {WRAPPER_PARAMS_TYPE_HASH, WRAPPER_TYPE_HASH_POSTFIX, WrapperParams} from
 ///      Mechanics: `_authorizingOwner` now receives the (trusted, signature-bound) `params` directly, so
 ///      the owner can be decoded from `WrapperParams.target` with no transient-storage plumbing.
 contract WrapperDataOwnerAuthWrapper is CowAuthWrapper {
-    constructor(ICowSettlement settlement) CowAuthWrapper(WRAPPER_TYPE_HASH_POSTFIX, settlement) {}
+    constructor(ICowSettlement settlement)
+        CowAuthWrapper(WRAPPER_AND_APP_DATA_STRUCT_DEF, WRAPPER_PARAMS_STRUCT_DEF, settlement)
+    {}
 
     function name() external pure returns (string memory) {
         return "WrapperData Owner Auth Wrapper";
@@ -49,10 +56,17 @@ contract WrapperDataOwnerAuthWrapper is CowAuthWrapper {
         return abi.decode(params, (WrapperParams)).target;
     }
 
-    /// @dev Validates the wrapperData decodes into `WrapperParams`.
+    /// @dev CoW's order owner (the EIP-1271 verifier that holds and sells the funds) is this wrapper itself.
+    ///      Decoupled from the authorizing owner returned by `_authorizingOwner`.
+    function _settlementOrderOwner(bytes calldata, bytes calldata) internal view override returns (address) {
+        return address(this);
+    }
+
+    /// @dev Validates the wrapperData: `nestedAppData(32) ‖ orderData(384) ‖ signature(65) ‖ params` decodes
+    ///      into `WrapperParams`.
     function validateWrapperData(bytes calldata data) external pure override {
-        require(data.length >= 32, "wrapperData too short");
-        abi.decode(data[32:], (WrapperParams));
+        require(data.length >= 32 + 384 + 65, "wrapperData too short");
+        abi.decode(data[32 + 384 + 65:], (WrapperParams));
     }
 }
 
@@ -182,7 +196,7 @@ contract CowAuthWrapperIntegrationTest is Test {
         );
         assertEq(orderData.length, 384);
 
-        bytes memory signatureData = _buildSignatureData(useEcdsa, orderData);
+        bytes memory ownerSignature = _buildOwnerSignature(useEcdsa, orderData);
 
         // Fund the trade with real tokens: the wrapper (CoW order owner) holds and approves the sell token;
         // the settlement holds the buy-side liquidity that will be paid to the receiver.
@@ -191,16 +205,17 @@ contract CowAuthWrapperIntegrationTest is Test {
         WETH.approve(vaultRelayer, type(uint256).max);
         deal(address(USDC), MAINNET_SETTLEMENT, BUY_AMOUNT);
 
-        settleData = _buildSettleData(validTo, orderAppData, signatureData);
-        // On-chain wrapperData now embeds the order orderData between nestedAppData and the params.
-        bytes memory wrapperData = _buildWrapperData(nestedAppData, orderData, params);
+        settleData = _buildSettleData(validTo, orderAppData);
+        // On-chain wrapperData embeds the order orderData and the owner signature between nestedAppData and
+        // the params: `nestedAppData ‖ orderData ‖ signature(65) ‖ abi.encode(params)`.
+        bytes memory wrapperData = _buildWrapperData(nestedAppData, orderData, ownerSignature, params);
         chainedWrapperData = abi.encodePacked(uint16(wrapperData.length), wrapperData);
     }
 
-    /// @dev Produces the 65-byte EIP-1271 signature payload (the order data now travels in wrapperData).
-    ///      ECDSA path signs the wrapper-domain digest; pre-approved path uses a zero sig (v = 0) and records
-    ///      the digest as pre-approved by `owner`.
-    function _buildSignatureData(bool useEcdsa, bytes memory orderData) internal returns (bytes memory sig) {
+    /// @dev Produces the 65-byte owner authorization carried in wrapperData (verified in `_wrap`). ECDSA path
+    ///      signs the wrapper-domain digest; pre-approved path uses a zero sig (v = 0) and records the digest
+    ///      as pre-approved by `owner`.
+    function _buildOwnerSignature(bool useEcdsa, bytes memory orderData) internal returns (bytes memory sig) {
         bytes32 wrapperOrderDigest = _orderDigest(
             wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), orderData
         );
@@ -226,11 +241,7 @@ contract CowAuthWrapperIntegrationTest is Test {
     /// @dev Builds `ICowSettlement.settle` calldata for a single eip1271 sell order (WETH -> USDC).
     ///      tokens = [WETH, USDC]; clearingPrices are set so
     ///      executedBuyAmount = SELL_AMOUNT * prices[sell] / prices[buy] = BUY_AMOUNT.
-    function _buildSettleData(uint32 validTo, bytes32 orderAppData, bytes memory signatureData)
-        internal
-        view
-        returns (bytes memory)
-    {
+    function _buildSettleData(uint32 validTo, bytes32 orderAppData) internal view returns (bytes memory) {
         address[] memory tokens = new address[](2);
         tokens[0] = address(WETH);
         tokens[1] = address(USDC);
@@ -251,8 +262,9 @@ contract CowAuthWrapperIntegrationTest is Test {
             feeAmount: FEE_AMOUNT,
             flags: FLAGS_EIP1271_SELL,
             executedAmount: 0, // ignored for fill-or-kill
-            // eip1271 signature = 20-byte verifier (this wrapper) followed by the wrapper's signatureData.
-            signature: abi.encodePacked(address(wrapper), signatureData)
+            // eip1271 signature = 20-byte verifier (this wrapper). The owner authorization now travels in
+            // wrapperData and is verified in `_wrap`, so the EIP-1271 signatureData is empty.
+            signature: abi.encodePacked(address(wrapper))
         });
 
         return abi.encodeCall(ICowSettlement.settle, (tokens, prices, trades, _emptyInteractions()));
@@ -290,13 +302,15 @@ contract CowAuthWrapperIntegrationTest is Test {
         return abi.encodePacked(nestedAppData, abi.encode(params));
     }
 
-    /// @notice The full on-chain wrapperData: `nestedAppData ‖ orderData ‖ abi.encode(params)`.
-    function _buildWrapperData(bytes32 nestedAppData, bytes memory orderData, WrapperParams memory params)
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encodePacked(nestedAppData, orderData, abi.encode(params));
+    /// @notice The full on-chain wrapperData:
+    ///         `nestedAppData ‖ orderData ‖ signature(65) ‖ abi.encode(params)`.
+    function _buildWrapperData(
+        bytes32 nestedAppData,
+        bytes memory orderData,
+        bytes memory signature,
+        WrapperParams memory params
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(nestedAppData, orderData, signature, abi.encode(params));
     }
 
     function _buildEncodeData(

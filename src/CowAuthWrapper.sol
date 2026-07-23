@@ -32,10 +32,14 @@ library CowAuthLibrary {
         "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,uint256 buyAmount,uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)"
     );
 
-    /// @dev The EIP-712 type hash for the order struct used in the CoW settlement contract. Similar to DOMAIN_TYPE_HASH, it is intentionally hardcoded here.
-    /// We replace the order's `appData` field with a `WrapperAndAppData wrapperAndAppData` struct so the wrapper can bind additional data into the signature; the `orderAppData` the order commits to becomes `hashStruct(WrapperAndAppData)`. The rest of the type is identical to the settlement's.
-    string internal constant ORDER_TYPE_HASH_PLUS_WRAPPER_AND_APP_DATA_PREFIX =
-        "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,uint256 buyAmount,uint32 validTo,WrapperAndAppData wrapperAndAppData,uint256 feeAmount,string kind,bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)WrapperAndAppData(bytes32 nestedAppData,";
+    /// @dev The EIP-712 `Order` struct definition (type string up to and including its own closing paren).
+    /// We replace the order's `appData` field with a `WrapperAndAppData wrapperAndAppData` struct so the wrapper
+    /// can bind additional data into the signature; the `orderAppData` the order commits to becomes
+    /// `hashStruct(WrapperAndAppData)`. The rest of the type is identical to the settlement's. The referenced
+    /// struct definitions are appended by the constructor in EIP-712 CANONICAL (alphabetical) order so a
+    /// standard wallet's `eth_signTypedData_v4` reproduces the wrapper order digest.
+    string internal constant ORDER_TYPE_STRING =
+        "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,uint256 buyAmount,uint32 validTo,WrapperAndAppData wrapperAndAppData,uint256 feeAmount,string kind,bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)";
 
     /// @notice Compute the EIP-712 domain separator for the CowAuthWrapper contract
     /// @param creationAddress The address of the CowAuthWrapper contract
@@ -74,40 +78,49 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
     /// @dev The order's on-chain `appData` field does not match the WrapperAndAppData envelope derived from
     ///      the (trusted) wrapperData — the solver's params are not the ones the user signed over.
     error OrderAppDataMismatch(bytes32 computed, bytes32 orderAppData);
-    /// @dev `wrapperData` handed to `_wrap` is shorter than `nestedAppData(32) ‖ orderData(384)`.
+    /// @dev `wrapperData` handed to `_wrap` is shorter than `nestedAppData(32) ‖ orderData(384) ‖ signature(65)`.
     error InvalidWrapperData(bytes wrapperData);
-    /// @dev The `signatureData` handed to `isValidSignature` is shorter than the 65-byte ECDSA slot.
-    error InvalidSignature(bytes signatureData);
     /// @dev `isValidSignature` was invoked for a digest `_wrap` never committed in this transaction.
     error UnknownOrder(bytes32 orderDigest);
     /// @dev After settlement returned, the order this wrapper authorized was not actually filled — so we
     ///      cannot conclude `isValidSignature` ran. See the guarantee documented on `_wrap`.
     error OrderNotFilled(bytes32 settlementOrderDigest);
 
-    /// @dev Transient-storage namespaces. Per-order slots are `keccak256(namespace ‖ settlementOrderDigest)`
-    ///      so the two values `_wrap` hands to `isValidSignature` cannot collide with each other or with
-    ///      transient slots a concrete wrapper might use.
+    /// @dev Transient-storage namespace. The per-order slot is `keccak256(namespace ‖ settlementOrderDigest)`
+    ///      so the value `_wrap` hands to `isValidSignature` cannot collide with transient slots a concrete
+    ///      wrapper might use.
     bytes32 private constant _PENDING_WRAPPER_DIGEST_NS = keccak256("CowAuthWrapper.pending.wrapperOrderDigest");
-    bytes32 private constant _PENDING_OWNER_NS = keccak256("CowAuthWrapper.pending.owner");
 
     bytes32 public immutable WRAPPER_DOMAIN_SEPARATOR;
     bytes32 public immutable SETTLEMENT_DOMAIN_SEPARATOR;
     bytes32 public immutable ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH;
     bytes32 public immutable WRAPPER_AND_APP_DATA_TYPE_HASH;
 
-    // @param wrapperTypeHashPostfix A string to be appended to the type hash of the wrapper's domain separator. This allows for multiple wrappers with different type hashes, which can be useful for differentiating between different wrapper versions or types in the future.
-    // Example value: "MyWrapperParams params)MyWrapperParams(string param1,uint256 param2)"
-    constructor(string memory wrapperTypeHashPostfix, ICowSettlement settlement) CowWrapper(settlement) {
+    /// @param wrapperStructDef The FULL EIP-712 definition of the `WrapperAndAppData` struct — i.e.
+    ///        `"WrapperAndAppData(bytes32 nestedAppData,<PrimaryParamsType> <name>)"` — where the concrete
+    ///        wrapper's own params struct is the second field. Example:
+    ///        `"WrapperAndAppData(bytes32 nestedAppData,MetaOrder metaOrder)"`.
+    /// @param referencedTypeDefs The concrete wrapper's referenced struct definitions, concatenated in EIP-712
+    ///        CANONICAL (alphabetical-by-type-name) order and each sorting BEFORE "WrapperAndAppData". Example:
+    ///        `"MetaOrder(...)SafeTx(...)"`.
+    /// @dev Both EIP-712 type hashes are assembled here in canonical (alphabetical) referenced-type order, so
+    ///      a standard wallet's `eth_signTypedData_v4` (which always sorts referenced types alphabetically)
+    ///      reproduces the wrapper order digest exactly — enabling structured signing (not just raw-hash /
+    ///      pre-approval). For the Order type the referenced set is `{MetaOrder, SafeTx, WrapperAndAppData}`;
+    ///      since "WrapperAndAppData" sorts last, it comes after `referencedTypeDefs`.
+    constructor(string memory wrapperStructDef, string memory referencedTypeDefs, ICowSettlement settlement)
+        CowWrapper(settlement)
+    {
         WRAPPER_DOMAIN_SEPARATOR = CowAuthLibrary.computeDomainSeparator(address(this));
 
         SETTLEMENT_DOMAIN_SEPARATOR = SETTLEMENT.domainSeparator();
 
-        ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(
-            abi.encodePacked(CowAuthLibrary.ORDER_TYPE_HASH_PLUS_WRAPPER_AND_APP_DATA_PREFIX, wrapperTypeHashPostfix)
-        );
+        // Order type: Order(...) ‖ MetaOrder(...) ‖ SafeTx(...) ‖ WrapperAndAppData(...) — canonical.
+        ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH =
+            keccak256(abi.encodePacked(CowAuthLibrary.ORDER_TYPE_STRING, referencedTypeDefs, wrapperStructDef));
 
-        WRAPPER_AND_APP_DATA_TYPE_HASH =
-            keccak256(abi.encodePacked("WrapperAndAppData(bytes32 nestedAppData,", wrapperTypeHashPostfix));
+        // WrapperAndAppData type: WrapperAndAppData(...) ‖ MetaOrder(...) ‖ SafeTx(...) — canonical.
+        WRAPPER_AND_APP_DATA_TYPE_HASH = keccak256(abi.encodePacked(wrapperStructDef, referencedTypeDefs));
     }
 
     /// @inheritdoc IERC165
@@ -119,37 +132,44 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
     }
 
     /// @notice CoW wrapper entry point for an auth-wrapped order.
-    /// @dev New in this design: the order the user signed (its 384-byte EIP-712 `orderData`) is carried in
-    ///      `wrapperData` rather than in the EIP-1271 `signatureData`. This lets the wrapper compute the
-    ///      settlement order digest itself, and — after settlement returns — confirm on the settlement
-    ///      contract that this exact order was filled.
+    /// @dev In this design both the order the user signed (its 384-byte EIP-712 `orderData`) AND the owner's
+    ///      65-byte authorization signature over the wrapper order digest are carried in `wrapperData` rather
+    ///      than in the EIP-1271 `signatureData` GPv2 forwards to `isValidSignature`. This lets the wrapper
+    ///      compute the settlement order digest itself and — critically — verify the owner's authorization
+    ///      HERE, in the wrapper's own execution frame, BEFORE `_authedWrap` runs any side effects.
     ///
-    ///      SECURITY GUARANTEE (why the fill check is sound): GPv2 only increments `filledAmount` for an
-    ///      order after it has been executed, and for an EIP-1271 order it executes only after
-    ///      `isValidSignature` returns the magic value. The `orderUid` we check pins `owner = address(this)`
-    ///      (CoW's order owner is the EIP-1271 verifier, i.e. this wrapper). An `eip712` order cannot have a
-    ///      keyless contract as owner, and a `presign` order with this wrapper as owner is unreachable
-    ///      (`setPreSignature` requires `msg.sender == owner`, and the wrapper never calls it). So the only
-    ///      way `filledAmount[orderUid]` can rise is the eip1271 path, which forces our `isValidSignature`
-    ///      to have run and passed for exactly `settlementOrderDigest`. This closes the previous gap where a
-    ///      solver could settle without ever triggering our authorization yet still benefit from
-    ///      `_authedWrap`'s side effects. It also means an auth wrapper only authorizes orders for which it
-    ///      is itself the verifier/owner (relevant when chaining wrappers).
+    ///      SECURITY GUARANTEE (authorization cannot be bypassed): the owner authorization (ECDSA signature or
+    ///      pre-approved hash over the wrapper order digest) is verified in `_commitOrder`, which runs before
+    ///      `_authedWrap`. Previously this verification lived in `isValidSignature`, reached only via GPv2 →
+    ///      the owner account's EIP-1271 entry point (for `CoWSafeWrapper`, the Safe's fallback handler → this
+    ///      wrapper). That made it subvertible: a solver-chosen `pre` interaction executed as the owner account
+    ///      could change that account's authentication (e.g. repoint the Safe's fallback handler at an attacker
+    ///      contract that returns the magic value unconditionally), so `isValidSignature` — and with it the
+    ///      whole authorization check — was skipped while `_authedWrap`'s side effects (and the fill) still
+    ///      happened. Verifying in `_wrap` closes that: `_authedWrap` (hence any owner-account-authentication
+    ///      change in `pre`) only runs AFTER a valid owner authorization for exactly this order is proven, and
+    ///      that proof does not route through the owner account at all.
     ///
-    ///      wrapperData layout: `nestedAppData(32) ‖ orderData(384) ‖ params`.
+    ///      The fill check (`filledAmount` rose) is retained as a separate guarantee that the intended order
+    ///      actually settled: GPv2 only increments `filledAmount` after executing the order, and the `orderUid`
+    ///      pins `owner = _settlementOrderOwner(...)` (each concrete wrapper states it explicitly). So the
+    ///      owner-authorized `pre`/`post` can never run around a no-op settle.
+    ///
+    ///      wrapperData layout: `nestedAppData(32) ‖ orderData(384) ‖ signature(65) ‖ params`.
     function _wrap(bytes calldata settleData, bytes calldata wrapperData, bytes calldata remainingWrapperData)
         internal
         override
     {
-        require(wrapperData.length >= 32 + 384, InvalidWrapperData(wrapperData));
+        require(wrapperData.length >= 32 + 384 + 65, InvalidWrapperData(wrapperData));
 
-        bytes calldata params = wrapperData[32 + 384:];
+        bytes calldata signature = wrapperData[32 + 384:32 + 384 + 65];
+        bytes calldata params = wrapperData[32 + 384 + 65:];
 
-        // Validate the order, commit what `isValidSignature` needs to transient storage, and read the
-        // pre-settlement filled amount for the order's uid. Split into a helper to keep `_wrap` within the
-        // EVM stack limit (the default profile compiles without via-IR).
+        // Validate the order, verify the owner's authorization, commit what `isValidSignature` needs to
+        // transient storage, and read the pre-settlement filled amount for the order's uid. Split into a helper
+        // to keep `_wrap` within the EVM stack limit (the default profile compiles without via-IR).
         (bytes memory orderUid, uint256 filledBefore, bytes32 settlementOrderDigest) =
-            _commitOrder(wrapperData[32:32 + 384], params, bytes32(wrapperData[:32]));
+            _commitOrder(wrapperData[32:32 + 384], params, bytes32(wrapperData[:32]), signature);
 
         _authedWrap(settleData, params, remainingWrapperData);
 
@@ -158,13 +178,17 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
         require(SETTLEMENT.filledAmount(orderUid) > filledBefore, OrderNotFilled(settlementOrderDigest));
     }
 
-    /// @dev Validates the order against the wrapper params, records the wrapper-domain digest + authorizing
-    ///      owner in transient storage (keyed by the settlement digest GPv2 will pass to `isValidSignature`),
-    ///      and returns the GPv2 orderUid plus its current filled amount so `_wrap` can confirm the fill.
+    /// @dev Validates the order against the wrapper params, verifies the owner's authorization over the
+    ///      wrapper-domain order digest (the check moved here from `isValidSignature` — see the SECURITY
+    ///      GUARANTEE on `_wrap`), records that digest in transient storage (keyed by the settlement digest
+    ///      GPv2 will pass to `isValidSignature`), and returns the GPv2 orderUid plus its current filled amount
+    ///      so `_wrap` can confirm the fill.
     /// @param orderData The 384-byte order orderData.
     /// @param params The raw wrapper-specific params.
     /// @param nestedAppData The ordinary CoW app-data hash committed inside the WrapperAndAppData envelope.
-    function _commitOrder(bytes calldata orderData, bytes calldata params, bytes32 nestedAppData)
+    /// @param signature The 65-byte `[r ‖ s ‖ v]` owner authorization over the wrapper order digest. `v == 0`
+    ///        selects the pre-approved-hash path.
+    function _commitOrder(bytes calldata orderData, bytes calldata params, bytes32 nestedAppData, bytes calldata signature)
         private
         returns (bytes memory orderUid, uint256 filledBefore, bytes32 settlementOrderDigest)
     {
@@ -176,24 +200,43 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
             require(orderAppData == orderAppDataInOrder, OrderAppDataMismatch(orderAppData, orderAppDataInOrder));
         }
 
-        // Recompute the settlement- and wrapper-domain order digests from the order data, then stash what
-        // `isValidSignature` needs keyed by the digest GPv2 will pass to the EIP-1271 callback.
+        // Recompute the settlement- and wrapper-domain order digests from the order data.
         bytes32 wrapperOrderDigest;
         (settlementOrderDigest, wrapperOrderDigest) = _computeOrderDigests(orderData);
+
+        // Verify the order owner's authorization over the wrapper order digest HERE — before any side effects
+        // run (see the SECURITY GUARANTEE on `_wrap`). The owner is the account whose ECDSA signature must
+        // recover, or whose pre-approved hash must be set, as stated by the concrete wrapper.
         {
-            (bytes32 digestSlot, bytes32 ownerSlot) = _pendingSlots(settlementOrderDigest);
             address owner = _authorizingOwner(orderData, params);
+            if (signature[64] == 0) {
+                // no ECDSA signature provided, so it has to be a pre-approved hash
+                require(isHashPreApproved(owner, wrapperOrderDigest), Unauthorized(owner));
+            } else {
+                address signer = ECDSA.recoverCalldata(wrapperOrderDigest, signature);
+                require(signer == owner, Unauthorized(signer));
+            }
+        }
+
+        // Stash the verified wrapper digest keyed by the digest GPv2 will pass to the EIP-1271 callback, so
+        // that in the honest (untampered) flow `isValidSignature` blesses ONLY this order.
+        {
+            bytes32 digestSlot = _pendingSlot(settlementOrderDigest);
             assembly {
                 tstore(digestSlot, wrapperOrderDigest)
-                tstore(ownerSlot, owner)
             }
         }
 
         // GPv2 orderUid = orderDigest ‖ owner ‖ validTo. validTo is word 5 of orderData (a uint32 stored
         // right-aligned in its 32-byte word, so read the whole word and downcast — do NOT read the leading
-        // 4 bytes, which are zero). The owner pinned here is this wrapper (CoW's order owner is the verifier).
-        orderUid =
-            abi.encodePacked(settlementOrderDigest, address(this), uint32(uint256(bytes32(orderData[32 * 5:32 * 6]))));
+        // 4 bytes, which are zero). The owner is the account CoW treats as the order owner, stated explicitly
+        // by the concrete wrapper via `_settlementOrderOwner` (CoWSafeWrapper → the position Safe). See the
+        // SECURITY GUARANTEE on `_wrap`.
+        orderUid = abi.encodePacked(
+            settlementOrderDigest,
+            _settlementOrderOwner(orderData, params),
+            uint32(uint256(bytes32(orderData[32 * 5:32 * 6])))
+        );
         filledBefore = SETTLEMENT.filledAmount(orderUid);
     }
 
@@ -237,8 +280,8 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
     function _wrapperSigningData(bytes calldata wrapperData) internal view virtual returns (bytes memory);
 
     /// @notice Returns the account that must have authorized the order currently being wrapped — i.e. the
-    ///         account whose ECDSA signature must recover, or whose pre-approved hash must be set, in
-    ///         `isValidSignature`.
+    ///         account whose ECDSA signature must recover, or whose pre-approved hash must be set, when
+    ///         `_wrap` verifies the owner authorization.
     /// @dev This is an authorization identity and is intentionally decoupled from CoW's notion of the order
     ///      owner (the EIP-1271 verifier, which is always THIS wrapper and is where sell tokens are pulled
     ///      from). The default reads the 20 bytes at the sellToken position of the order (word 0), which
@@ -259,6 +302,24 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
     {
         return address(bytes20(orderData[12:32]));
     }
+
+    /// @notice Returns the account CoW Protocol treats as the order's owner — the EIP-1271 verifier GPv2
+    ///         calls `isValidSignature` on, and the account GPv2 pulls the order's sell tokens from. It is
+    ///         woven into the `orderUid` the fill check keys on, so it MUST equal the address GPv2 derives as
+    ///         the owner from the trade's EIP-1271 signature.
+    /// @dev Intentionally abstract — this is security-critical and must never be assumed. Each concrete
+    ///      wrapper states its owner explicitly: a wrapper that is itself the verifier and sell-token source
+    ///      returns `address(this)`; one whose funds and signature live on a controlled smart account (e.g.
+    ///      `CoWSafeWrapper`, where the position Safe holds the sell tokens and forwards `isValidSignature` to
+    ///      the wrapper via its fallback handler) returns that account. The returned account must be a keyless
+    ///      contract for the fill-check guarantee to hold (see the SECURITY GUARANTEE on `_wrap`).
+    /// @param orderData The 384-byte EIP-712 order data carried in the wrapperData.
+    /// @param params The raw wrapper-specific params (e.g. abi.encode(MetaOrder)), which overrides can decode.
+    function _settlementOrderOwner(bytes calldata orderData, bytes calldata params)
+        internal
+        view
+        virtual
+        returns (address);
 
     /// @notice Recomputes the settlement- and wrapper-domain EIP-712 order digests from an order's orderData.
     /// @dev A large portion of this was copied from `GPv2Signer`'s `ecdsaRecover`: the wrapper-domain digest
@@ -313,54 +374,40 @@ abstract contract CowAuthWrapper is CowWrapper, PreApprovedHashes, IERC1271, IER
         }
     }
 
-    /// @dev Derives the two transient-storage slots that carry the pending order from `_wrap` to
-    ///      `isValidSignature`, namespaced by `settlementOrderDigest` so they never collide with each other
-    ///      or with transient slots a concrete wrapper might use.
-    function _pendingSlots(bytes32 settlementOrderDigest) private pure returns (bytes32 digestSlot, bytes32 ownerSlot) {
+    /// @dev Derives the transient-storage slot that carries the pending order's verified wrapper digest from
+    ///      `_wrap` to `isValidSignature`, namespaced by `settlementOrderDigest` so it never collides with
+    ///      transient slots a concrete wrapper might use.
+    function _pendingSlot(bytes32 settlementOrderDigest) private pure returns (bytes32 digestSlot) {
         // forge-lint: disable-next-line(asm-keccak256)
         digestSlot = keccak256(abi.encodePacked(_PENDING_WRAPPER_DIGEST_NS, settlementOrderDigest));
-        // forge-lint: disable-next-line(asm-keccak256)
-        ownerSlot = keccak256(abi.encodePacked(_PENDING_OWNER_NS, settlementOrderDigest));
     }
 
     /// @notice Implements EIP-1271 `isValidSignature`, called by GPv2 during `settle` for the order this
-    ///         wrapper verifies. It verifies the order owner's authorization (ECDSA signature or pre-approved
-    ///         hash) against the wrapper-domain order digest that `_wrap` committed earlier in this same
-    ///         transaction.
-    /// @dev The order data is NO LONGER carried here — `_wrap` received it in `wrapperData`, computed the
-    ///      wrapper-domain digest and the authorizing owner, and stashed them in transient storage keyed by
-    ///      the settlement order digest. GPv2 passes that same settlement digest as `orderDigest`, so a
-    ///      missing (zero) entry means either `_wrap` never committed this order or the settle trade's order
-    ///      fields differ from the wrapperData (their digests would differ) — both are rejected. This
-    ///      implicitly enforces the old "settlement digest matches" check.
+    ///         wrapper verifies. It confirms `_wrap` committed exactly this order earlier in the same
+    ///         transaction and returns the magic value.
+    /// @dev The owner authorization is NO LONGER checked here — `_wrap` received the order and the owner's
+    ///      65-byte signature in `wrapperData`, verified the authorization in its own execution frame, and
+    ///      stashed the verified wrapper digest in transient storage keyed by the settlement order digest (see
+    ///      the SECURITY GUARANTEE on `_wrap` for why the check moved). GPv2 passes that same settlement digest
+    ///      as `orderDigest`, so a missing (zero) entry means either `_wrap` never committed this order or the
+    ///      settle trade's order fields differ from the wrapperData (their digests would differ) — both are
+    ///      rejected, so GPv2 blesses only the exact order `_wrap` authorized. The `signatureData` GPv2
+    ///      forwards is unused: the authorization no longer depends on it (or on being reached through the
+    ///      owner account's EIP-1271 entry point at all).
     /// @param orderDigest The order digest as recognized by the settlement contract.
-    /// @param signatureData The 65-byte `[r ‖ s ‖ v]` ECDSA signature. `v == 0` selects the pre-approved-hash
-    ///        path. (The verifier address GPv2 strips from the trade signature is not included here.)
-    function isValidSignature(bytes32 orderDigest, bytes calldata signatureData)
+    function isValidSignature(bytes32 orderDigest, bytes calldata /* signatureData */ )
         external
         view
         returns (bytes4 magicValue)
     {
-        require(signatureData.length >= 65, InvalidSignature(signatureData));
-
-        (bytes32 digestSlot, bytes32 ownerSlot) = _pendingSlots(orderDigest);
+        bytes32 digestSlot = _pendingSlot(orderDigest);
         bytes32 wrapperOrderDigest;
-        address owner;
         assembly {
             wrapperOrderDigest := tload(digestSlot)
-            owner := tload(ownerSlot)
         }
 
         // A zero digest means `_wrap` did not commit this exact order in this transaction.
         require(wrapperOrderDigest != bytes32(0), UnknownOrder(orderDigest));
-
-        if (signatureData[64] == 0) {
-            // no ECDSA signature provided, so it has to be a pre-approved hash
-            require(isHashPreApproved(owner, wrapperOrderDigest), Unauthorized(owner));
-        } else {
-            address signer = ECDSA.recoverCalldata(wrapperOrderDigest, signatureData[:65]);
-            require(signer == owner, Unauthorized(signer));
-        }
 
         return IERC1271.isValidSignature.selector;
     }

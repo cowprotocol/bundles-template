@@ -46,14 +46,14 @@ contract CowAuthWrapperUnitTest is Test {
 
     function test_validateWrapperData_acceptsWellFormedData() public view {
         WrapperParams memory params = WrapperParams({target: address(0xABCD), amount: 1, label: "ok"});
-        // nestedAppData(32) ‖ orderData(384) ‖ abi.encode(params)
-        bytes memory data = abi.encodePacked(bytes32("nested"), new bytes(384), abi.encode(params));
+        // nestedAppData(32) ‖ orderData(384) ‖ signature(65) ‖ abi.encode(params)
+        bytes memory data = abi.encodePacked(bytes32("nested"), new bytes(384), new bytes(65), abi.encode(params));
         wrapper.validateWrapperData(data); // must not revert
     }
 
     function test_validateWrapperData_revertsWhenTooShort() public {
         vm.expectRevert(bytes("wrapperData too short"));
-        wrapper.validateWrapperData(new bytes(415)); // < 32 + 384
+        wrapper.validateWrapperData(new bytes(480)); // < 32 + 384 + 65
     }
 
     // -----------------------------------------------------------------------

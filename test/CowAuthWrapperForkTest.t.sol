@@ -147,10 +147,13 @@ contract CowAuthWrapperForkTest is Test {
     // pre-approved hash check and ECDSA recovery operate on the correct account.
     //
     // NOTE: PRE-APPROVED vs ECDSA BRANCH SELECTION
-    // isValidSignature dispatches on signatureData[64] — the v byte of the [r 32][s 32][v 1] sig.
-    // v == 0 → pre-approved path; v ∈ {27,28} → ECDSA path.
-    // The pre-approved test sends 65 zero bytes for the sig region (v = 0).
-    // The ECDSA test sends a real vm.sign output packed as [r][s][v].
+    // The owner authorization is now verified in `_wrap` (not `isValidSignature`), reading the 65-byte
+    // signature carried in wrapperData at `[416:481]`. `_commitOrder` dispatches on signature[64] — the v
+    // byte of the [r 32][s 32][v 1] sig. v == 0 → pre-approved path; v ∈ {27,28} → ECDSA path.
+    // The pre-approved test embeds 65 zero bytes for the sig region (v = 0).
+    // The ECDSA test embeds a real vm.sign output packed as [r][s][v].
+    // The EIP-1271 signatureData GPv2 forwards to `isValidSignature` is unused, so the mock is primed with
+    // an empty sig payload.
 
     /// @dev Empty settle calldata; the mock drives the isValidSignature callback via `setCallback`.
     function _emptySettleData() internal pure returns (bytes memory) {
@@ -182,11 +185,13 @@ contract CowAuthWrapperForkTest is Test {
         wrapper.setPreApprovedHash(wrapperOrderDigest, true);
         assertTrue(wrapper.isHashPreApproved(owner, wrapperOrderDigest));
 
-        // The order data now travels in wrapperData; the 65-byte sig region has v = 0 → pre-approved branch.
-        mockSettlement.setCallback(address(wrapper), settlementOrderDigest, new bytes(65), validTo);
+        // The order data AND the 65-byte sig region (v = 0 → pre-approved branch) now travel in wrapperData;
+        // the EIP-1271 signatureData GPv2 forwards is unused.
+        mockSettlement.setCallback(address(wrapper), settlementOrderDigest, hex"", validTo);
 
-        bytes4 result =
-            wrapper.wrappedSettle(_emptySettleData(), _chained(_buildWrapperData(nestedAppData, orderData, params)));
+        bytes4 result = wrapper.wrappedSettle(
+            _emptySettleData(), _chained(_buildWrapperData(nestedAppData, orderData, new bytes(65), params))
+        );
 
         assertEq(result, ICowWrapper.wrappedSettle.selector);
         assertTrue(mockSettlement.settleWasCalled());
@@ -200,31 +205,36 @@ contract CowAuthWrapperForkTest is Test {
         WrapperParams memory params =
             WrapperParams({target: makeAddr("target"), amount: 42_000e18, label: "my-wrapper-label"});
         bytes32 nestedAppData = keccak256("ecdsa-app-data");
-        (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
-
         uint32 validTo = uint32(block.timestamp + 1 hours);
-        bytes memory orderData =
-            _buildEncodeData(owner, address(0xBEEF), address(0xCAFE), 1 ether, 2000e6, validTo, orderAppData, 0);
 
-        bytes32 settlementOrderDigest =
-            _orderDigest(wrapper.SETTLEMENT_DOMAIN_SEPARATOR(), CowAuthLibrary.ORDER_TYPE_HASH, orderData);
-        bytes32 wrapperOrderDigest = _orderDigest(
-            wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), orderData
-        );
-
-        // Owner signs the wrapper-domain digest. OZ ECDSA.recoverCalldata reads the sig as [r][s][v].
-        bytes memory signatureData;
+        bytes memory orderData;
         {
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, wrapperOrderDigest);
-            assertNotEq(v, 0, "v should be 27 or 28"); // v != 0 → ECDSA branch, not pre-approved
-            signatureData = abi.encodePacked(r, s, v);
+            (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
+            orderData =
+                _buildEncodeData(owner, address(0xBEEF), address(0xCAFE), 1 ether, 2000e6, validTo, orderAppData, 0);
         }
 
-        mockSettlement.setCallback(address(wrapper), settlementOrderDigest, signatureData, validTo);
-        assertFalse(wrapper.isHashPreApproved(owner, wrapperOrderDigest), "should not be pre-approved");
+        // Owner signs the wrapper-domain digest. OZ ECDSA.recoverCalldata reads the sig as [r][s][v]. The
+        // signature is carried in wrapperData and verified in `_wrap`. Scoped so the signing locals are freed.
+        bytes memory wrapperData;
+        {
+            bytes32 wrapperOrderDigest = _orderDigest(
+                wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), orderData
+            );
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, wrapperOrderDigest);
+            assertNotEq(v, 0, "v should be 27 or 28"); // v != 0 → ECDSA branch, not pre-approved
+            assertFalse(wrapper.isHashPreApproved(owner, wrapperOrderDigest), "should not be pre-approved");
+            wrapperData = _buildWrapperData(nestedAppData, orderData, abi.encodePacked(r, s, v), params);
+        }
 
-        bytes4 result =
-            wrapper.wrappedSettle(_emptySettleData(), _chained(_buildWrapperData(nestedAppData, orderData, params)));
+        mockSettlement.setCallback(
+            address(wrapper),
+            _orderDigest(wrapper.SETTLEMENT_DOMAIN_SEPARATOR(), CowAuthLibrary.ORDER_TYPE_HASH, orderData),
+            hex"",
+            validTo
+        );
+
+        bytes4 result = wrapper.wrappedSettle(_emptySettleData(), _chained(wrapperData));
 
         assertEq(result, ICowWrapper.wrappedSettle.selector);
         assertTrue(mockSettlement.settleWasCalled());
@@ -258,13 +268,14 @@ contract CowAuthWrapperForkTest is Test {
         );
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ownerKey, wrapperOrderDigest);
-        mockSettlement.setCallback(address(wrapper), settlementOrderDigest, abi.encodePacked(r, s, v), validTo);
+        // The owner's signature travels in wrapperData; the EIP-1271 signatureData is unused.
+        mockSettlement.setCallback(address(wrapper), settlementOrderDigest, hex"", validTo);
 
         settleData = abi.encodeCall(
             ICowSettlement.settle,
             (new address[](0), new uint256[](0), new ICowSettlement.Trade[](0), _emptyInteractions())
         );
-        wrapperData = _buildWrapperData(nestedAppData, orderData, params);
+        wrapperData = _buildWrapperData(nestedAppData, orderData, abi.encodePacked(r, s, v), params);
     }
 
     function _chained(bytes memory wrapperData) internal pure returns (bytes memory) {
@@ -272,44 +283,47 @@ contract CowAuthWrapperForkTest is Test {
     }
 
     /// @dev Builds a valid order (sellToken = owner, so the default _authorizingOwner resolves to `owner`)
-    ///      and returns the pieces needed to prime the callback with an arbitrary signature.
+    ///      and returns the pieces needed to assemble wrapperData with an arbitrary signature.
     function _prepareOrder(bytes32 nestedAppData, WrapperParams memory params)
         internal
         view
-        returns (bytes memory wrapperData, bytes32 settlementOrderDigest, bytes32 wrapperOrderDigest, uint32 validTo)
+        returns (bytes memory orderData, bytes32 settlementOrderDigest, bytes32 wrapperOrderDigest, uint32 validTo)
     {
         validTo = uint32(block.timestamp + 1 hours);
         (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
-        bytes memory orderData =
-            _buildEncodeData(owner, address(0xBEEF), address(0xCAFE), 1 ether, 2000e6, validTo, orderAppData, 0);
+        orderData = _buildEncodeData(owner, address(0xBEEF), address(0xCAFE), 1 ether, 2000e6, validTo, orderAppData, 0);
         settlementOrderDigest =
             _orderDigest(wrapper.SETTLEMENT_DOMAIN_SEPARATOR(), CowAuthLibrary.ORDER_TYPE_HASH, orderData);
         wrapperOrderDigest = _orderDigest(
             wrapper.WRAPPER_DOMAIN_SEPARATOR(), wrapper.ORDER_PLUS_WRAPPER_AND_APP_DATA_TYPE_HASH(), orderData
         );
-        wrapperData = _buildWrapperData(nestedAppData, orderData, params);
     }
 
-    /// @dev A committed order whose ECDSA signature recovers to someone other than the owner is rejected.
+    /// @dev An order whose ECDSA signature (carried in wrapperData) recovers to someone other than the owner
+    ///      is rejected in `_wrap`, before settlement runs.
     function test_wrappedSettle_revertsOnWrongEcdsaSigner() public {
         WrapperParams memory params = WrapperParams({target: makeAddr("t"), amount: 1, label: "x"});
-        (bytes memory wrapperData, bytes32 sDigest, bytes32 wDigest, uint32 validTo) =
-            _prepareOrder(keccak256("wrong-signer"), params);
+        bytes32 nestedAppData = keccak256("wrong-signer");
+        (bytes memory orderData, bytes32 sDigest, bytes32 wDigest, uint32 validTo) =
+            _prepareOrder(nestedAppData, params);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(uint256(keccak256("not-owner")), wDigest);
-        mockSettlement.setCallback(address(wrapper), sDigest, abi.encodePacked(r, s, v), validTo);
+        mockSettlement.setCallback(address(wrapper), sDigest, hex"", validTo);
+        bytes memory wrapperData = _buildWrapperData(nestedAppData, orderData, abi.encodePacked(r, s, v), params);
 
         vm.expectPartialRevert(CowAuthWrapper.Unauthorized.selector);
         wrapper.wrappedSettle(_emptySettleData(), _chained(wrapperData));
     }
 
-    /// @dev A committed order taking the pre-approved path (v = 0) whose hash was never approved is rejected.
+    /// @dev An order taking the pre-approved path (v = 0) whose hash was never approved is rejected in `_wrap`.
     function test_wrappedSettle_revertsIfPreApprovalMissing() public {
         WrapperParams memory params = WrapperParams({target: makeAddr("t"), amount: 1, label: "x"});
-        (bytes memory wrapperData, bytes32 sDigest,, uint32 validTo) =
-            _prepareOrder(keccak256("no-preapproval"), params);
+        bytes32 nestedAppData = keccak256("no-preapproval");
+        (bytes memory orderData, bytes32 sDigest,, uint32 validTo) = _prepareOrder(nestedAppData, params);
 
-        mockSettlement.setCallback(address(wrapper), sDigest, new bytes(65), validTo); // v = 0, never approved
+        mockSettlement.setCallback(address(wrapper), sDigest, hex"", validTo);
+        // v = 0 → pre-approved branch, but the digest was never approved.
+        bytes memory wrapperData = _buildWrapperData(nestedAppData, orderData, new bytes(65), params);
 
         vm.expectPartialRevert(CowAuthWrapper.Unauthorized.selector);
         wrapper.wrappedSettle(_emptySettleData(), _chained(wrapperData));
@@ -336,30 +350,24 @@ contract CowAuthWrapperForkTest is Test {
         wrapper.wrappedSettle(settleData, _chained(wrapperData));
     }
 
-    /// @dev wrapperData shorter than `nestedAppData(32) ‖ orderData(384)` is rejected up front.
+    /// @dev wrapperData shorter than `nestedAppData(32) ‖ orderData(384) ‖ signature(65)` is rejected up front.
     function test_wrappedSettle_revertsOnShortWrapperData() public {
         bytes memory settleData = abi.encodeCall(
             ICowSettlement.settle,
             (new address[](0), new uint256[](0), new ICowSettlement.Trade[](0), _emptyInteractions())
         );
-        bytes memory tooShort = new bytes(100); // < 416
+        bytes memory tooShort = new bytes(100); // < 481
 
         vm.expectPartialRevert(CowAuthWrapper.InvalidWrapperData.selector);
         wrapper.wrappedSettle(settleData, _chained(tooShort));
     }
 
-    /// @dev isValidSignature must reject a digest that `_wrap` never committed in this transaction.
+    /// @dev isValidSignature must reject a digest that `_wrap` never committed in this transaction. The
+    ///      signatureData argument is unused (authorization is verified in `_wrap`), so it is passed empty.
     function test_isValidSignature_revertsForUncommittedOrder() public {
         bytes32 unknownDigest = keccak256("never committed");
         vm.expectRevert(abi.encodeWithSelector(CowAuthWrapper.UnknownOrder.selector, unknownDigest));
-        wrapper.isValidSignature(unknownDigest, new bytes(65));
-    }
-
-    /// @dev isValidSignature must reject a signature payload shorter than the 65-byte ECDSA slot.
-    function test_isValidSignature_revertsForShortSignature() public {
-        bytes memory shortSig = new bytes(10);
-        vm.expectRevert(abi.encodeWithSelector(CowAuthWrapper.InvalidSignature.selector, shortSig));
-        wrapper.isValidSignature(keccak256("x"), shortSig);
+        wrapper.isValidSignature(unknownDigest, hex"");
     }
 
     // -----------------------------------------------------------------------
@@ -400,11 +408,12 @@ contract CowAuthWrapperForkTest is Test {
     /// The on-chain wrapperData layout consumed by `_wrap` is now:
     ///   [0:32]     nestedAppData
     ///   [32:416]   order orderData (the 12-field CoW order the user signed)
-    ///   [416:]     abi.encode(WrapperParams)   (raw ABI encoding, label string intact)
+    ///   [416:481]  owner signature `[r ‖ s ‖ v]` over the wrapper order digest (v = 0 → pre-approved path)
+    ///   [481:]     abi.encode(WrapperParams)   (raw ABI encoding, label string intact)
     ///
     /// Because the order orderData sits between nestedAppData and the params, and itself depends on the
     /// orderAppData derived here, the full wrapperData is assembled by the caller (via `_buildWrapperData`)
-    /// once the orderData is known.
+    /// once the orderData and signature are known.
     function _appDataHashes(bytes32 nestedAppData, WrapperParams memory params)
         internal
         pure
@@ -420,13 +429,15 @@ contract CowAuthWrapperForkTest is Test {
         orderAppData = keccak256(abi.encodePacked(WRAPPER_AND_APP_DATA_TYPE_HASH, nestedAppData, wrapperParamsHash));
     }
 
-    /// @notice Assembles the on-chain wrapperData: `nestedAppData ‖ orderData ‖ abi.encode(params)`.
-    function _buildWrapperData(bytes32 nestedAppData, bytes memory orderData, WrapperParams memory params)
-        internal
-        pure
-        returns (bytes memory wrapperData)
-    {
-        wrapperData = abi.encodePacked(nestedAppData, orderData, abi.encode(params));
+    /// @notice Assembles the on-chain wrapperData:
+    ///         `nestedAppData ‖ orderData ‖ signature(65) ‖ abi.encode(params)`.
+    function _buildWrapperData(
+        bytes32 nestedAppData,
+        bytes memory orderData,
+        bytes memory signature,
+        WrapperParams memory params
+    ) internal pure returns (bytes memory wrapperData) {
+        wrapperData = abi.encodePacked(nestedAppData, orderData, signature, abi.encode(params));
     }
 
     function _buildEncodeData(
