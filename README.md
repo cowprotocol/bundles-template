@@ -1,10 +1,18 @@
-# Contract Template
+# Atomic Bundles
 
-Template for creating new smart contract projects.
+Smart contracts for CoW Protocol atomic bundles (formerly Generalized Wrappers).
 
-This project is meant to be used as a templated during the creation of new Github repositories (will show in the `Create a new repository > Configuration > Start with a template` selector).
+For a full explanation of atomic bundles — what they are, when to use them, security requirements, and gas costs — see the [CoW Protocol documentation](https://docs.cow.fi/cow-protocol/reference/contracts/periphery/wrapper).
 
-It will contain some useful configuration files and scripts, that can be used also with existing projects (manually copied).
+## Contracts
+
+| Contract | Description |
+|---|---|
+| `CowWrapper.sol` | Abstract base contract and interfaces (`ICowWrapper`, `ICowSettlement`, `ICowAuthentication`). Self-contained — no external dependencies. Inherit this for any new bundle. |
+| `CowAuthWrapper.sol` | Extension of `CowWrapper` with EIP-712/EIP-1271 authentication, binding each order to wrapper-specific typed data. |
+| `PreApprovedHashes.sol` | Abstract contract for pre-approving order hashes on-chain, enabling gasless or signature-free order submission. |
+| `CowWrapperHelpers.sol` | Off-chain utility for validating wrapper chains and encoding `chainedWrapperData`. Not intended for on-chain use. |
+| `ExampleWrapper.sol` | Reference implementation showing how to build a bundle on top of `CowAuthWrapper`. |
 
 ## Usage
 
@@ -18,9 +26,7 @@ Install `just` on your machine, then run `just help` to see the available comman
 just build
 ```
 
-Project contracts should keep simple caret pragmas like `^0.8` so downstream projects can import them with older compatible Solidity 0.8 compilers.
-
-If specific features are needed (like PUSH0 in 0.8.20 for gas optimizations or transient storage/better `via-ir` in 0.8.34), you can use it but make sure to keep the caret (`^`).
+Project contracts use caret pragmas like `^0.8` so downstream projects can import them with any compatible Solidity 0.8 compiler.
 
 ### Test
 
@@ -36,8 +42,7 @@ just fmt
 
 ### Local tooling
 
-Foundry should be installed locally and pinned to `v1.7.0`.
-CI uses the same Foundry version.
+Foundry should be installed locally and pinned to `v1.7.0`. CI uses the same version.
 
 Install Foundry with:
 
@@ -55,7 +60,7 @@ The output should end in `v1.7.0`.
 
 Solhint and Slither are pinned as local development dependencies under `dev/`.
 
-The pnpm and uv setups wait 7 days before installing newly released packages, matching CoW repos and giving more review time than a 2-day delay.
+The pnpm and uv setups wait 7 days before installing newly released packages, giving more review time than a 2-day delay.
 
 Install them with:
 
@@ -64,7 +69,7 @@ pnpm --dir dev install --frozen-lockfile
 uv sync --project dev --locked
 ```
 
-Run the pinned local tools through `just`. `just lint` checks Forge formatting and Solhint, and `just slither` checks contracts under `src`.
+Run the pinned local tools through `just`. `just lint` checks Forge formatting and Solhint; `just slither` checks contracts under `src`.
 
 ```shell
 just lint
@@ -79,51 +84,11 @@ Install the hooks with:
 just register-hooks
 ```
 
-The pre-push hooks run `just lint`, `just slither`, and `just coverage-check`.
-You can bypass hooks with `--no-verify`, but CI remains the source of truth.
+The pre-push hooks run `just lint`, `just slither`, and `just coverage-check`. You can bypass hooks with `--no-verify`, but CI remains the source of truth.
 
-The root config applies to all Solidity files.
-The `script/` and `test/` folders have a small override config for their own style.
-
-### Gas Snapshots
+### Gas snapshots
 
 ```shell
 just snapshot
 ```
 
-### Deploy
-
-```shell
-forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-## New project creation checklist
-
-The following operations need to be performed after this repository has been created.
-
-- [ ] Discuss and confirm the project license with the team lead before starting implementation work. You must set this up before writing project code.
-  - [ ] The license is very likely going to be one of the following:
-    - [ ] `MIT OR Apache-2.0` for projects with low strategic relevance (included by default in the template).
-    - [ ] `LGPL-3.0-or-later` for projects with high strategic relevance.
-    - [ ] In some cases, a different license may be needed.
-  - [ ] If it's `MIT OR Apache-2.0`, the license is already included. Otherwise, remove the existing license files and add the selected license as a file in the repository root.
-  - [ ] Update `dev/package.json` with the selected license.
-  - [ ] Update each Solidity smart contract's `SPDX-License-Identifier` with the selected license.
-- [ ] In GitHub repo settings:
-  - [ ] Add a new ruleset called "Protected branches" and include the following changes:
-    - Enforcement status: active
-    - Target branches: Include default branch
-    - Require linear history
-    - Require a pull request before merging
-      - Required approvals: 1
-      - Allowed merge methods: Squash
-    - Block force pushes
-  - [ ] In General → Features → Pull requests:
-    - Select "Pull request title and description" in "Default commit message" option
-    - Unckeck "Allow merge commits" option
-    - Check "Allow auto-merge" option
-- [ ] Run `forge install` to install the dependencies. This will create a new `foundry.lock` file which you should commit to the project
-- [ ] Set up [Local tooling](#local-tooling) so Solhint and Slither use the pinned project versions
-- [ ] Update the project details in `dev/package.json`, including `name` and `description`
-- [ ] Make sure you use the [latest version of Solidity](https://github.com/argotorg/solidity/releases) by updating the `solc` version in `foundry.toml`
-- [ ] Once all entries in this list are checked, delete this section from the readme
