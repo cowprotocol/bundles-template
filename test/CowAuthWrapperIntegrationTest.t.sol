@@ -144,12 +144,12 @@ contract CowAuthWrapperIntegrationTest is Test {
     /// @notice The on-chain `computeOrderAppData` getter (used by the orderbook to validate a wrapper
     ///         order's orderAppData) must return exactly the envelope hash the order commits to.
     function test_computeOrderAppData_matchesEnvelope() public view {
-        bytes32 nestedAppData = keccak256("integration-app-data");
+        string memory nestedAppData = "integration-app-data";
         WrapperParams memory params = WrapperParams({target: owner, amount: 42_000e18, label: "integration"});
-        (, bytes32 orderAppData) = _appDataHashes(nestedAppData, params);
+        (, bytes32 orderAppData) = _appDataHashes(keccak256(bytes(nestedAppData)), params);
 
         assertEq(
-            wrapper.computeOrderAppData(_commitmentData(nestedAppData, params)),
+            wrapper.computeOrderAppData(nestedAppData, abi.encode(params)),
             orderAppData,
             "getter must reproduce the WrapperAndAppData envelope hash"
         );

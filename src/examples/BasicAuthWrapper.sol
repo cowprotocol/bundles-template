@@ -72,11 +72,8 @@ contract BasicAuthWrapper is CowAuthWrapper {
     }
 
     /// @inheritdoc CowAuthWrapper
-    /// @dev This wrapper is itself the EIP-1271 verifier GPv2 calls and the account the sell tokens are pulled
-    ///      from, so CoW's order owner is this contract. (Distinct from the authorizing owner, which the
-    ///      default `_authorizingOwner` reads from the order's sell-token slot.)
-    function _settlementOrderOwner(bytes calldata, bytes calldata) internal view override returns (address) {
-        return address(this);
+    function _authorizingOwner(bytes calldata, bytes calldata wrapperParams) internal pure override returns (address) {
+        return abi.decode(wrapperParams, (WrapperParams)).target;
     }
 
     /// @dev wrapperData = 32 bytes nestedAppData ‖ 384 bytes order orderData ‖ 65 bytes owner signature ‖
