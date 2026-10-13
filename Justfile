@@ -59,6 +59,7 @@ coverage-check:
         /^\| Total/ { \
             found=1; \
             for (i=4; i<=13; i+=3) { \
+                if ($i == "N/A" && $(i+1) == "(0/0)") continue; \
                 gsub(/%/, "", $i); \
                 v=$i+0; \
                 if (v < min) min=v; \
