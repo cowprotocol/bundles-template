@@ -6,6 +6,32 @@ This project is meant to be used as a templated during the creation of new Githu
 
 It will contain some useful configuration files and scripts, that can be used also with existing projects (manually copied).
 
+## Two app-data hashes (`CowAuthWrapper`)
+
+An order settled through a `CowAuthWrapper` involves **two distinct app-data hashes**. Throughout the
+code they are always named `nestedAppData` or `orderAppData` — never a bare `appData` — so it is
+unambiguous which one is meant.
+
+- **`nestedAppData`** — the *ordinary* CoW app-data hash: `keccak256` of the app-data document
+  **excluding** this wrapper's own call. Because it excludes the wrapper call it has no self-reference and
+  can be computed client-side. It is the first field of the `WrapperAndAppData` struct and is carried as
+  the leading 32 bytes of the wrapper's on-chain `wrapperData` (`nestedAppData ‖ params`).
+
+- **`orderAppData`** — the value actually placed in the CoW order's on-chain `appData` field and signed by
+  the user. It is the EIP-712 `hashStruct(WrapperAndAppData)`:
+
+  ```
+  orderAppData = keccak256(WRAPPER_AND_APP_DATA_TYPE_HASH ‖ nestedAppData ‖ hashStruct(wrapperParams))
+  ```
+
+  `_wrap` recomputes it from the trusted `wrapperData`, stores it in transient storage, and
+  `isValidSignature` requires the order's `appData` field to match — this is what binds the solver-supplied
+  wrapper params to the order the user signed. Off-chain services can reproduce it without the wrapper's
+  ABI via the `computeOrderAppData(wrapperData)` view.
+
+> The CoW `Order` struct's field is canonically named `appData` (renaming it would break the settlement
+> digest); for an auth-wrapped order the **value** in that field is the `orderAppData`.
+
 ## Usage
 
 ### Just commands
