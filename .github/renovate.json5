@@ -3,6 +3,8 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["schedule:quarterly"],
+  // Keep automatic updates to open branches in the scheduled window.
+  updateNotScheduled: false,
   // Enable package managers for dependency updates.
   enabledManagers: ["github-actions", "npm", "pep621"],
   npm: {
